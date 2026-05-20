@@ -240,7 +240,7 @@ impl IRGenerator {
                 if let Expression::Property(prop_access) = &assignment.target.node {
                     if let Expression::Primary(PrimaryExpr::Identifier(target_array)) = &prop_access.object.node {
                         let right_val = self.generate_expression(&assignment.value);
-                        let size = *self.array_sizes.get(target_array).unwrap_or(&1000);
+                        let size = *self.array_sizes.get(target_array).unwrap_or(&100000); // 100000 per precaució
                         self.emit(IRInstruction::FlatVectorApply(
                             target_array.clone(),
                             prop_access.property.clone(),
@@ -254,17 +254,34 @@ impl IRGenerator {
 
                 let right_val = self.generate_expression(&assignment.value);
                 
+                let final_val = match assignment.op {
+                    AssignOp::Assign => right_val,
+                    _ => {
+                        let left_val = self.generate_expression(&assignment.target);
+                        let bin_op = match assignment.op {
+                            AssignOp::AddAssign => BinaryOp::Add,
+                            AssignOp::SubAssign => BinaryOp::Sub,
+                            AssignOp::MulAssign => BinaryOp::Mul,
+                            AssignOp::DivAssign => BinaryOp::Div,
+                            AssignOp::Assign => unreachable!(),
+                        };
+                        let dest = self.new_temp();
+                        self.emit(IRInstruction::BinaryOp(dest.clone(), bin_op, left_val, right_val));
+                        dest
+                    }
+                };
+                
                 if let Expression::Property(prop_access) = &assignment.target.node {
                     let obj_val = self.generate_expression(&prop_access.object);
                     self.emit(IRInstruction::StoreProperty(
                         obj_val,
                         prop_access.property.clone(),
-                        right_val,
+                        final_val,
                     ));
                 } else if let Expression::Primary(PrimaryExpr::Identifier(name)) = &assignment.target.node {
                     self.emit(IRInstruction::Assign(
                         IROperand::Variable(name.clone()),
-                        right_val,
+                        final_val,
                     ));
                 }
             }

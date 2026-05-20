@@ -141,8 +141,11 @@ fn main() {
             process::exit(1);
         }
 
-        // Invoke clang to compile .ll to binary
+        // Invoke clang to compile .ll to binary with full optimization
         let clang_status = process::Command::new("clang")
+            .arg("-O3")
+            .arg("-march=native")
+            .arg("-ffast-math")
             .arg(&ll_filename)
             .arg("-o")
             .arg(&bin_filename)
@@ -164,6 +167,7 @@ fn main() {
             Ok(status) => {
                 if !status.success() {
                     eprintln!("Program exited with an error status: {}", status);
+                    process::exit(1);
                 }
             }
             Err(e) => {

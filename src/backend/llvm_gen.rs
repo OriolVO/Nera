@@ -12,6 +12,7 @@ pub struct LLVMGenerator {
     function_params: HashMap<String, LLVMValue>,
     scalar_vars: std::collections::HashSet<String>,
     main_arena_ptr: Option<LLVMValue>,
+    shared_vec_idx: Option<LLVMValue>,
 }
 
 impl LLVMGenerator {
@@ -23,6 +24,7 @@ impl LLVMGenerator {
             function_params: HashMap::new(),
             scalar_vars: std::collections::HashSet::new(),
             main_arena_ptr: None,
+            shared_vec_idx: None,
         }
     }
 
@@ -88,7 +90,7 @@ impl LLVMGenerator {
             }
         }
 
-        self.builder.declare("declare i8* @malloc(i64)");
+        self.builder.declare("declare i8* @aligned_alloc(i64, i64)");
         self.builder.declare("declare void @free(i8*)");
         self.builder.declare("declare i32 @printf(i8*, ...)");
         self.builder.declare("@str_fmt_int = private unnamed_addr constant [5 x i8] c\"%ld\\0A\\00\", align 1");
@@ -123,6 +125,7 @@ impl LLVMGenerator {
         self.temp_map.clear();
         self.function_params.clear();
         self.main_arena_ptr = None;
+        self.shared_vec_idx = None;
 
         let mut params = Vec::new();
         for param in &func.params {
@@ -144,9 +147,12 @@ impl LLVMGenerator {
             self.builder.start_block(&block.name);
 
             if first_block {
+                let shared_idx = self.builder.build_alloca("shared_vec_idx", LLVMType::I64);
+                self.shared_vec_idx = Some(shared_idx);
+
                 if func.name == "main" {
                     // Dynamic Arena Allocation Calculation
-                    let total_elements: i64 = 1000;
+                    let total_elements: i64 = 100000;
                     let mut size_of_struct: i64 = 0;
                     
                     for (soa_array, _sz) in soa_arrays {
@@ -162,7 +168,8 @@ impl LLVMGenerator {
                     let arena_size = total_elements * size_of_struct;
                     let arena_size_val = LLVMValue::ConstI64(arena_size.max(8)); // at least 8 bytes
 
-                    let arena_start_i8 = self.builder.build_call(LLVMType::Pointer(Box::new(LLVMType::I8)), "malloc", vec![arena_size_val]);
+                    let arena_start_i8 = self.builder.build_call(LLVMType::Pointer(Box::new(LLVMType::I8)), "aligned_alloc", vec![LLVMValue::ConstI64(32), arena_size_val]);
+                    self.main_arena_ptr = Some(arena_start_i8.clone());
                     let arena_start = self.builder.build_bitcast(arena_start_i8.clone(), LLVMType::Pointer(Box::new(LLVMType::I64)));
 
                     let mut current_offset = 0;
@@ -176,7 +183,7 @@ impl LLVMGenerator {
                         let casted = self.builder.build_bitcast(ptr_reg, ptr_ty);
                         self.function_params.insert(soa_array.clone(), casted);
                         
-                        let elements = 1000; // matching TotalElements
+                        let elements = total_elements; // must match total_elements
                         let bytes = match field_ty {
                             TypeInfo::Float => 8,
                             TypeInfo::Boolean => 1,
@@ -433,10 +440,7 @@ impl LLVMGenerator {
                     _ => LLVMType::I64,
                 };
 
-                let idx_ptr_name = format!("vec_idx_{}", self.builder.next_reg_name());
-                // Since we are not in the entry block, allocating here might not be optimal, but mem2reg still works.
-                // Or better, we can inject alloca into entry block if we had access, but doing it here is fine for Nera.
-                let idx_ptr = self.builder.build_alloca(&idx_ptr_name, LLVMType::I64);
+                let idx_ptr = self.shared_vec_idx.clone().unwrap();
                 self.builder.build_store(LLVMValue::ConstI64(0), idx_ptr.clone(), None);
 
                 self.builder.build_br(&loop_head);

@@ -1,0 +1,20 @@
+// bench.nera
+data Particle {
+    x: Float
+    y: Float
+    vx: Float
+    vy: Float
+}
+
+fn main() -> Int {
+    mut swarm: Particle[100000] = []
+    
+    // Simula 1000 iteracions
+    mut i: Int = 0
+    while i < 1000 {
+        swarm.x += swarm.vx
+        swarm.y += swarm.vy
+        i += 1
+    }
+    return 0
+}

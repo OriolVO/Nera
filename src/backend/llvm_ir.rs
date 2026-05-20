@@ -441,7 +441,13 @@ impl IRBuilder {
         out.push('\n');
 
         for func in &self.module.funcs {
-            let param_strs: Vec<String> = func.params.iter().map(|(n, t)| format!("{} %{}", t.to_string(), n)).collect();
+            let param_strs: Vec<String> = func.params.iter().map(|(n, t)| {
+                if let LLVMType::Pointer(_) = t {
+                    format!("{} noalias %{}", t.to_string(), n)
+                } else {
+                    format!("{} %{}", t.to_string(), n)
+                }
+            }).collect();
             out.push_str(&format!("define {} @{}({}) {{\n", func.ret_ty.to_string(), func.name, param_strs.join(", ")));
             for block in &func.blocks {
                 out.push_str(&format!("{}:\n", block.name));
