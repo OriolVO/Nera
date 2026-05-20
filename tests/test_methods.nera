@@ -1,0 +1,13 @@
+data Engine {
+    rpm: Int
+}
+
+fn accelerar(mut e: Engine) {
+    e.rpm += 500
+}
+
+fn main() {
+    mut motor: Engine[] = [] // Mida per defecte 1000
+    motor.accelerar()        // El desugaring ho converteix en: accelerar(motor)
+    print(motor.rpm)
+}

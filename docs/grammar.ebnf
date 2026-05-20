@@ -1,0 +1,65 @@
+/* ===================================================
+   NERA GRAMMAR v1.2 (Production & Sincronized)
+   =================================================== */
+
+Program         ::= Declaration*
+
+Declaration     ::= DataDecl | FnDecl | VarDecl
+
+/* --- ESTRUCTURES DE DADES --- */
+DataDecl        ::= "data" Identifier "{" FieldDecl* "}"
+FieldDecl       ::= Identifier ":" Type
+
+/* --- FUNCIONS --- */
+FnDecl          ::= "fn" Identifier "(" ParamList? ")" ("->" Type)? Block
+ParamList       ::= Param ("," Param)*
+Param           ::= "mut"? Identifier ":" Type
+
+/* --- TIPUS --- */
+Type            ::= Identifier ("[" Integer? "]")?
+
+/* --- BLOCS I INSTRUCCIONS --- */
+Block           ::= "{" Statement* "}"
+
+Statement       ::= VarDecl 
+                  | Assignment 
+                  | IfStmt 
+                  | WhileStmt
+                  | ReturnStmt 
+                  | ExprStmt
+
+VarDecl         ::= ("let" | "mut") Identifier (":" Type)? "=" Expression
+Assignment      ::= Expression ("=" | "+=" | "-=" | "*=" | "/=") Expression
+IfStmt          ::= "if" Expression Block ("else" IfStmt | "else" Block)?
+WhileStmt       ::= "while" Expression Block 
+ReturnStmt      ::= "return" Expression?
+ExprStmt        ::= Expression
+
+/* --- EXPRESSIONS (Ordre de prioritat de menor a major) --- */
+Expression      ::= PipeExpr
+
+PipeExpr        ::= LogicalExpr (">>" LogicalExpr)*
+LogicalExpr     ::= EqualityExpr (("and" | "or") EqualityExpr)*
+EqualityExpr    ::= RelationalExpr (("==" | "!=") RelationalExpr)*
+RelationalExpr  ::= AdditiveExpr (("<" | "<=" | ">" | ">=") AdditiveExpr)*
+AdditiveExpr    ::= MultiplicativeExpr (("+" | "-") MultiplicativeExpr)*
+MultiplicativeExpr ::= PostfixExpr (("*" | "/") PostfixExpr)*
+
+/* Operadors Postfix: resol els mètodes encadenats i propietats en bucle */
+PostfixExpr     ::= PrimaryExpr ( "." Identifier | "(" ArgumentList? ")" )*
+
+PrimaryExpr     ::= Identifier 
+                  | Literal 
+                  | ListLiteral
+                  | "(" Expression ")"
+
+ArgumentList    ::= Expression ("," Expression)*
+
+/* --- BASIC ELEMENTS --- */
+ListLiteral     ::= "[" ArgumentList? "]"
+Identifier      ::= [a-zA-Z_] [a-zA-Z0-9_]*
+Literal         ::= Integer | Float | String | Boolean
+Integer         ::= [0-9]+
+Float           ::= [0-9]+ "." [0-9]+
+String          ::= '"' [^"]* '"'
+Boolean         ::= "true" | "false"

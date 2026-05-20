@@ -1,0 +1,15 @@
+data Counter {
+    total: Int
+}
+
+fn main() {
+    mut c: Counter[1] = []
+    mut i = 0
+    
+    while i < 5 {
+        c.total += 2
+        i = i + 1
+    }
+    
+    print(c.total)
+}

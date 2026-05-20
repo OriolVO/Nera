@@ -1,0 +1,4 @@
+fn error_sintaxi() {
+    let x = 5   // Falta el '=' o està mal format per validar la recuperació
+    mut y: Int = "hola" // Error semàntic de tipus
+}

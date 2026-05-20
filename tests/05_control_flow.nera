@@ -1,0 +1,21 @@
+data Guard {
+    status: Int
+}
+
+fn main() {
+    mut g: Guard[1] = []
+    let x = 10
+    let y = 20
+
+    if x < y {
+        if y == 20 {
+            g.status = 777 // Camí correcte
+        } else {
+            g.status = 111
+        }
+    } else {
+        g.status = 999
+    }
+    
+    print(g.status) // 777
+}

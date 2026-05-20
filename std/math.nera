@@ -1,0 +1,17 @@
+// Nera Standard Library: Mathematics (std.math)
+
+fn max(a: Int, b: Int) -> Int {
+    mut result = b
+    if a > b {
+        result = a
+    }
+    return result
+}
+
+fn min(a: Int, b: Int) -> Int {
+    mut result = b
+    if a < b {
+        result = a
+    }
+    return result
+}

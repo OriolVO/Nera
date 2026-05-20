@@ -1,0 +1,12 @@
+data Particle {
+    id: Int
+    x: Float
+}
+
+fn main() {
+    mut swarm: Particle[3] = [] // Força la inferència i la mida 3 a l'Arena
+    swarm.id += 1               // Omple els IDs utilitzant FlatVectorApply
+    
+    // Comprovem si el primer ID s'ha incrementat
+    print(swarm.id) 
+}

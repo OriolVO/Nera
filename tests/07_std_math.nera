@@ -1,0 +1,17 @@
+use std.math
+
+data Swarm {
+    value: Int
+}
+
+fn main() {
+    mut s: Swarm[1] = []
+    
+    let a = 150
+    let b = 100
+    
+    // Test 1: min(150, 100) hauria de donar 100
+    // Gràcies al desugaring de mètodes, a.min(b) es converteix en min(a, b)
+    s.value = a.min(b)
+    print(s.value)
+}

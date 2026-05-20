@@ -1,0 +1,31 @@
+use std.math
+
+data Particle {
+    x: Float
+    y: Float
+}
+
+fn main() {
+    // 1. Instanciem un eixam SoA de partícules
+    mut p: Particle[1] = []
+    
+    // 2. Variables de tipus Float pures
+    let initial_x: Float = 10.5
+    let delta: Float = 2.5
+    
+    // 3. Operacions matemàtiques flotants natives (fadd / fsub)
+    let final_x = initial_x + delta
+    
+    // 4. Vectorització Flat Application d'un Float sobre la columna .x
+    p.x = final_x
+    
+    // 5. Condicionals booleans reals (i1) amb fcmp
+    mut is_far: Boolean = false
+    if final_x > 12.0 {
+        is_far = true
+    }
+    
+    // 6. Prints sobrecarregats segons el tipus detectat
+    print(p.x)    // Hauria d'imprimir 13.000000 en format Float (%f)
+    print(is_far) // Hauria d'imprimir 1 en format Boolean/Int (%ld)
+}
