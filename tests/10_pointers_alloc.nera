@@ -1,0 +1,13 @@
+fn main() {
+    mut p1: ^Int = alloc Int()
+    p1^ = 42
+    
+    mut p2: ^Int = alloc Int()
+    p2^ = 100
+    
+    print(p1^)
+    print(p2^)
+    
+    p1^ = p2^ + 10
+    print(p1^)
+}

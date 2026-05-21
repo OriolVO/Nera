@@ -12,6 +12,9 @@ pub enum TypeInfo {
     Array(Box<TypeInfo>, Option<i64>),
     Custom(String),
     Unknown,
+    Pointer(Box<TypeInfo>),
+    Nullable(Box<TypeInfo>),
+    None,
 }
 
 macro_rules! primitive_type_mapper {
@@ -22,11 +25,18 @@ macro_rules! primitive_type_mapper {
                 "Unknown" => TypeInfo::Unknown,
                 custom => TypeInfo::Custom(custom.to_string()),
             };
-            if ty.is_array {
+            let mut resolved = if ty.is_array {
                 TypeInfo::Array(Box::new(base), ty.array_size)
             } else {
                 base
+            };
+            if ty.is_ptr {
+                resolved = TypeInfo::Pointer(Box::new(resolved));
             }
+            if ty.is_nullable {
+                resolved = TypeInfo::Nullable(Box::new(resolved));
+            }
+            resolved
         }
 
         pub fn to_string(&self) -> String {
@@ -35,6 +45,9 @@ macro_rules! primitive_type_mapper {
                 TypeInfo::Array(inner, _) => format!("{}[]", inner.to_string()),
                 TypeInfo::Custom(name) => name.clone(),
                 TypeInfo::Unknown => "Unknown".to_string(),
+                TypeInfo::Pointer(inner) => format!("^{}", inner.to_string()),
+                TypeInfo::Nullable(inner) => format!("?{}", inner.to_string()),
+                TypeInfo::None => "None".to_string(),
             }
         }
     };
@@ -253,7 +266,10 @@ impl<'a> SemanticAnalyzer<'a> {
                     size = explicit_ty.node.array_size;
                     let explicit_info = TypeInfo::from_ast(&explicit_ty.node);
                     if explicit_info != inferred_ty && inferred_ty != TypeInfo::Unknown {
-                        self.report_error(&explicit_ty.span, &format!("Type mismatch: expected {}, found {}", explicit_info.to_string(), inferred_ty.to_string()));
+                        let valid_null = matches!(&explicit_info, TypeInfo::Nullable(_)) && inferred_ty == TypeInfo::None;
+                        if !valid_null {
+                            self.report_error(&explicit_ty.span, &format!("Type mismatch: expected {}, found {}", explicit_info.to_string(), inferred_ty.to_string()));
+                        }
                     }
                     explicit_info
                 } else {
@@ -289,7 +305,10 @@ impl<'a> SemanticAnalyzer<'a> {
                     size = explicit_ty.node.array_size;
                     let explicit_info = TypeInfo::from_ast(&explicit_ty.node);
                     if explicit_info != inferred_ty && inferred_ty != TypeInfo::Unknown {
-                        self.report_error(&explicit_ty.span, &format!("Type mismatch: expected {}, found {}", explicit_info.to_string(), inferred_ty.to_string()));
+                        let valid_null = matches!(&explicit_info, TypeInfo::Nullable(_)) && inferred_ty == TypeInfo::None;
+                        if !valid_null {
+                            self.report_error(&explicit_ty.span, &format!("Type mismatch: expected {}, found {}", explicit_info.to_string(), inferred_ty.to_string()));
+                        }
                     }
                     explicit_info
                 } else {
@@ -315,7 +334,14 @@ impl<'a> SemanticAnalyzer<'a> {
                 let is_broadcasting = left_ty.is_array() && left_ty.get_array_inner() == Some(right_ty.clone());
 
                 if !is_broadcasting && left_ty != right_ty && left_ty != TypeInfo::Unknown && right_ty != TypeInfo::Unknown {
-                    self.report_error(&assignment.value.span, &format!("Type mismatch in assignment: cannot assign {} to {}", right_ty.to_string(), left_ty.to_string()));
+                    let valid_null = if let TypeInfo::Nullable(inner) = &left_ty {
+                        **inner == right_ty || right_ty == TypeInfo::None
+                    } else {
+                        false
+                    };
+                    if !valid_null {
+                        self.report_error(&assignment.value.span, &format!("Type mismatch in assignment: cannot assign {} to {}", right_ty.to_string(), left_ty.to_string()));
+                    }
                 }
 
                 if let Some(root_name) = self.get_root_identifier(&assignment.target) {
@@ -336,7 +362,31 @@ impl<'a> SemanticAnalyzer<'a> {
                     self.report_error(&if_stmt.condition.span, &format!("If condition must be a Boolean, found {}", cond_ty.to_string()));
                 }
                 
+                let mut smart_casted_var = None;
+                if let Expression::Binary(bin_expr) = &if_stmt.condition.node {
+                    if bin_expr.op == BinaryOp::NotEq {
+                        if let Expression::Primary(PrimaryExpr::Identifier(name)) = &bin_expr.left.node {
+                            if let Expression::Primary(PrimaryExpr::NoneLiteral) = &bin_expr.right.node {
+                                if let Some(Symbol::Variable(var_sym)) = self.env.resolve(name) {
+                                    if let TypeInfo::Nullable(inner) = &var_sym.ty {
+                                        smart_casted_var = Some((name.clone(), *inner.clone(), var_sym.is_mut, var_sym.size));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 self.env.enter_scope();
+                if let Some((name, inner_ty, is_mut, size)) = smart_casted_var {
+                    self.env.define(name.clone(), Symbol::Variable(VariableSymbol {
+                        is_mut,
+                        ty: inner_ty.clone(),
+                        size,
+                    }));
+                    self.inferred_types.insert(name, inner_ty);
+                }
+                
                 self.analyze_block(&mut if_stmt.then_block);
                 self.env.exit_scope();
                 
@@ -388,14 +438,23 @@ impl<'a> SemanticAnalyzer<'a> {
         // Intercept method call desugaring before matching
         if let Expression::Call(func_call) = &mut expr.node {
             if let Expression::Property(prop_access) = &func_call.callee.node {
-                // We have intercepted a method call: object.method(args...)
-                let object = prop_access.object.clone();
-                let method_name = prop_access.property.clone();
-                let method_span = func_call.callee.span.clone();
+                let mut is_choice = false;
+                if let Expression::Primary(PrimaryExpr::Identifier(base_name)) = &prop_access.object.node {
+                    if let Some(Symbol::Choice(_)) = self.env.resolve(base_name) {
+                        is_choice = true;
+                    }
+                }
+                
+                if !is_choice {
+                    // We have intercepted a method call: object.method(args...)
+                    let object = prop_access.object.clone();
+                    let method_name = prop_access.property.clone();
+                    let method_span = func_call.callee.span.clone();
 
-                func_call.arguments.insert(0, object);
-                func_call.callee.node = Expression::Primary(PrimaryExpr::Identifier(method_name));
-                func_call.callee.span = method_span;
+                    func_call.arguments.insert(0, object);
+                    func_call.callee.node = Expression::Primary(PrimaryExpr::Identifier(method_name));
+                    func_call.callee.span = method_span;
+                }
             }
         }
 
@@ -403,19 +462,25 @@ impl<'a> SemanticAnalyzer<'a> {
             Expression::When(when_expr) => {
                 let target_ty = self.analyze_expression(&mut when_expr.target);
                 let choice_name = match &target_ty {
-                    TypeInfo::Custom(name) => name.clone(),
+                    TypeInfo::Custom(name) => Some(name.clone()),
+                    TypeInfo::Nullable(_) => None,
                     _ => {
-                        self.report_error(&when_expr.target.span, &format!("Expected a choice type, found {}", target_ty.to_string()));
+                        self.report_error(&when_expr.target.span, &format!("Expected a choice or nullable type, found {}", target_ty.to_string()));
                         return TypeInfo::Unknown;
                     }
                 };
 
-                let choice_sym = match self.env.resolve(&choice_name) {
-                    Some(Symbol::Choice(sym)) => sym.clone(),
-                    _ => {
-                        self.report_error(&when_expr.target.span, &format!("'{}' is not a valid choice type", choice_name));
-                        return TypeInfo::Unknown;
+                let choice_sym = if let Some(name) = &choice_name {
+                    match self.env.resolve(name) {
+                        Some(Symbol::Choice(sym)) => Some(sym.clone()),
+                        _ => {
+                            self.report_error(&when_expr.target.span, &format!("'{}' is not a valid choice type", name));
+                            return TypeInfo::Unknown;
+                        }
                     }
+                } else {
+                    when_expr.is_nullable = true;
+                    None
                 };
 
                 let mut return_type: Option<TypeInfo> = None;
@@ -424,68 +489,131 @@ impl<'a> SemanticAnalyzer<'a> {
                 for case in &mut when_expr.cases {
                     seen_variants.insert(case.variant_name.clone());
 
-                    if let Some(associated_types) = choice_sym.variants.get(&case.variant_name) {
-                        if case.bindings.len() != associated_types.len() {
-                            self.report_error(&when_expr.target.span, &format!("Variant '{}' expects {} bindings, but got {}", case.variant_name, associated_types.len(), case.bindings.len()));
-                        }
+                    self.env.enter_scope();
+                    
+                    if let Some(sym) = &choice_sym {
+                        if let Some(associated_types) = sym.variants.get(&case.variant_name) {
+                            if case.bindings.len() != associated_types.len() {
+                                self.report_error(&when_expr.target.span, &format!("Variant '{}' expects {} bindings, but got {}", case.variant_name, associated_types.len(), case.bindings.len()));
+                            }
 
-                        self.env.enter_scope();
-                        for (i, binding) in case.bindings.iter().enumerate() {
-                            let ty = associated_types.get(i).cloned().unwrap_or(TypeInfo::Unknown);
-                            self.env.define(binding.clone(), Symbol::Variable(VariableSymbol {
+                            for (i, binding) in case.bindings.iter().enumerate() {
+                                let ty = associated_types.get(i).cloned().unwrap_or(TypeInfo::Unknown);
+                                self.env.define(binding.clone(), Symbol::Variable(VariableSymbol {
+                                    is_mut: false,
+                                    ty: ty.clone(),
+                                    size: None,
+                                }));
+                                self.inferred_types.insert(binding.clone(), ty);
+                            }
+                        } else {
+                            self.report_error(&when_expr.target.span, &format!("Variant '{}' is not defined for choice '{}'", case.variant_name, choice_name.clone().unwrap_or_default()));
+                        }
+                    } else if let TypeInfo::Nullable(inner) = &target_ty {
+                        if case.variant_name == "None" {
+                            if !case.bindings.is_empty() {
+                                self.report_error(&when_expr.target.span, "None case cannot have bindings");
+                            }
+                        } else {
+                            if !case.bindings.is_empty() {
+                                self.report_error(&when_expr.target.span, "Nullable capture case cannot have bindings (the variant name acts as the binding)");
+                            }
+                            self.env.define(case.variant_name.clone(), Symbol::Variable(VariableSymbol {
                                 is_mut: false,
-                                ty: ty.clone(),
+                                ty: *inner.clone(),
                                 size: None,
                             }));
-                            self.inferred_types.insert(binding.clone(), ty);
+                            self.inferred_types.insert(case.variant_name.clone(), *inner.clone());
                         }
-                        
-                        self.analyze_block(&mut case.body);
-                        let body_ty = if let Some(last_stmt) = case.body.node.statements.last_mut() {
-                            if let Statement::Expr(expr) = &mut last_stmt.node {
-                                self.analyze_expression(expr)
-                            } else {
-                                TypeInfo::Void
-                            }
+                    }
+                    
+                    self.analyze_block(&mut case.body);
+                    let body_ty = if let Some(last_stmt) = case.body.node.statements.last_mut() {
+                        if let Statement::Expr(expr) = &mut last_stmt.node {
+                            self.analyze_expression(expr)
                         } else {
                             TypeInfo::Void
-                        };
-                        self.env.exit_scope();
-
-                        if let Some(expected) = &return_type {
-                            if *expected != body_ty && body_ty != TypeInfo::Unknown && *expected != TypeInfo::Unknown {
-                                self.report_error(&when_expr.target.span, &format!("Incompatible return types in when cases: expected {}, found {}", expected.to_string(), body_ty.to_string()));
-                            }
-                        } else {
-                            return_type = Some(body_ty);
                         }
                     } else {
-                        self.report_error(&when_expr.target.span, &format!("Variant '{}' is not defined for choice '{}'", case.variant_name, choice_name));
+                        TypeInfo::Void
+                    };
+                    self.env.exit_scope();
+
+                    if let Some(expected) = &return_type {
+                        if *expected != body_ty && body_ty != TypeInfo::Unknown && *expected != TypeInfo::Unknown {
+                            self.report_error(&when_expr.target.span, &format!("Incompatible return types in when cases: expected {}, found {}", expected.to_string(), body_ty.to_string()));
+                        }
+                    } else {
+                        return_type = Some(body_ty);
                     }
                 }
 
-                // Exhaustiveness checking
-                for variant_name in choice_sym.variants.keys() {
-                    if !seen_variants.contains(variant_name) {
-                        self.report_error(&when_expr.target.span, &format!("Non-exhaustive pattern: variant '{}' is not handled", variant_name));
+                if let Some(sym) = choice_sym {
+                    for variant_name in sym.variants.keys() {
+                        if !seen_variants.contains(variant_name) {
+                            self.report_error(&when_expr.target.span, &format!("Non-exhaustive pattern: variant '{}' is not handled", variant_name));
+                        }
                     }
                 }
 
                 return_type.unwrap_or(TypeInfo::Unknown)
             }
-            Expression::Call(func_call) => {
+            Expression::VariantConstruct(var_construct) => {
+                for arg in &mut var_construct.arguments {
+                    self.analyze_expression(arg);
+                }
+                TypeInfo::Custom(var_construct.choice_name.clone())
+            }
+                        Expression::Call(func_call) => {
                 let mut arg_types = Vec::new();
                 for arg in &mut func_call.arguments {
                     arg_types.push(self.analyze_expression(arg));
                 }
+
+                let mut choice_info = None;
+                if let Expression::Property(prop_access) = &func_call.callee.node {
+                    if let Expression::Primary(PrimaryExpr::Identifier(base_name)) = &prop_access.object.node {
+                        if let Some(Symbol::Choice(choice_sym)) = self.env.resolve(base_name) {
+                            choice_info = Some((base_name.clone(), prop_access.property.clone(), choice_sym.clone()));
+                        }
+                    }
+                }
+                
+                if let Some((base_name, variant_name, choice_sym)) = choice_info {
+                    if let Some(variant_types) = choice_sym.variants.get(&variant_name) {
+                        if variant_types.len() != arg_types.len() {
+                            self.report_error(&expr.span, &format!("Variant '{}' expects {} arguments, but got {}", variant_name, variant_types.len(), arg_types.len()));
+                        } else {
+                            for (i, arg_ty) in arg_types.iter().enumerate() {
+                                let expected_ty = &variant_types[i];
+                                if *arg_ty != *expected_ty && *arg_ty != TypeInfo::Unknown && *expected_ty != TypeInfo::Unknown {
+                                    self.report_error(&func_call.arguments[i].span, &format!("Argument {} type mismatch: expected {}, found {}", i+1, expected_ty.to_string(), arg_ty.to_string()));
+                                }
+                            }
+                        }
+                        
+                        let new_node = Expression::VariantConstruct(Box::new(VariantConstructExpr {
+                            choice_name: base_name.clone(),
+                            variant_name: variant_name.clone(),
+                            arguments: std::mem::take(&mut func_call.arguments),
+                        }));
+                        expr.node = new_node;
+                        return TypeInfo::Custom(base_name);
+                    } else {
+                        self.report_error(&func_call.callee.span, &format!("Variant '{}' not found on choice '{}'", variant_name, base_name));
+                        return TypeInfo::Unknown;
+                    }
+                }
                 
                 if let Expression::Primary(PrimaryExpr::Identifier(name)) = &mut func_call.callee.node {
-                    if name == "print" {
+                    if name.starts_with("print") {
                         if arg_types.len() != 1 {
                             self.report_error(&func_call.callee.span, "Function 'print' expects exactly 1 argument");
                         } else {
                             if arg_types[0] == TypeInfo::Float {
                                 *name = "print_float".to_string();
+                            } else if arg_types[0] == TypeInfo::String {
+                                *name = "print_string".to_string();
                             } else {
                                 *name = "print_int".to_string();
                             }
@@ -548,7 +676,31 @@ impl<'a> SemanticAnalyzer<'a> {
                     BinaryOp::Pipe => right_ty,
                 }
             }
-            Expression::Property(prop_access) => {
+                        Expression::Property(prop_access) => {
+                let mut choice_info = None;
+                if let Expression::Primary(PrimaryExpr::Identifier(base_name)) = &prop_access.object.node {
+                    if let Some(Symbol::Choice(choice_sym)) = self.env.resolve(base_name) {
+                        choice_info = Some((base_name.clone(), prop_access.property.clone(), choice_sym.clone()));
+                    }
+                }
+                
+                if let Some((base_name, variant_name, choice_sym)) = choice_info {
+                    if let Some(variant_types) = choice_sym.variants.get(&variant_name) {
+                        if variant_types.is_empty() {
+                            let new_node = Expression::VariantConstruct(Box::new(VariantConstructExpr {
+                                choice_name: base_name.clone(),
+                                variant_name: variant_name.clone(),
+                                arguments: vec![],
+                            }));
+                            expr.node = new_node;
+                            return TypeInfo::Custom(base_name);
+                        } else {
+                            self.report_error(&expr.span, &format!("Variant '{}' expects {} arguments, but was used without arguments", variant_name, variant_types.len()));
+                            return TypeInfo::Unknown;
+                        }
+                    }
+                }
+                
                 let obj_ty = self.analyze_expression(&mut prop_access.object);
                 if obj_ty == TypeInfo::Unknown {
                     return TypeInfo::Unknown;
@@ -586,6 +738,36 @@ impl<'a> SemanticAnalyzer<'a> {
                     TypeInfo::Unknown
                 }
             }
+            Expression::Alloc(alloc_expr) => {
+                let allocated_type = TypeInfo::from_ast(&alloc_expr.ty.node);
+                if let TypeInfo::Custom(name) = &allocated_type {
+                    let mut found = false;
+                    if let Some(sym) = self.env.resolve(name) {
+                        if matches!(sym, Symbol::Data(_) | Symbol::Choice(_)) {
+                            found = true;
+                        }
+                    }
+                    if !found {
+                        self.report_error(&alloc_expr.ty.span, &format!("Cannot allocate unknown type '{}'", name));
+                        return TypeInfo::Unknown;
+                    }
+                }
+                
+                for arg in &mut alloc_expr.arguments {
+                    self.analyze_expression(arg);
+                }
+                
+                TypeInfo::Pointer(Box::new(allocated_type))
+            }
+            Expression::Deref(inner_expr) => {
+                let inner_type = self.analyze_expression(&mut *inner_expr);
+                if let TypeInfo::Pointer(inner) = inner_type {
+                    *inner
+                } else {
+                    self.report_error(&inner_expr.span, "Cannot dereference a non-pointer type");
+                    TypeInfo::Unknown
+                }
+            }
             Expression::Primary(primary) => {
                 match primary {
                     PrimaryExpr::Integer(_) => TypeInfo::Int,
@@ -593,8 +775,15 @@ impl<'a> SemanticAnalyzer<'a> {
                     PrimaryExpr::String(_) => TypeInfo::String,
                     PrimaryExpr::Boolean(_) => TypeInfo::Boolean,
                     PrimaryExpr::Identifier(name) => {
-                        if let Some(Symbol::Variable(var_sym)) = self.env.resolve(name) {
-                            var_sym.ty.clone()
+                        if let Some(sym) = self.env.resolve(name) {
+                            match sym {
+                                Symbol::Variable(var_sym) => var_sym.ty.clone(),
+                                Symbol::Choice(_) | Symbol::Data(_) => TypeInfo::Custom(name.clone()),
+                                _ => {
+                                    self.report_error(&expr.span, &format!("Cannot use '{}' as a value", name));
+                                    TypeInfo::Unknown
+                                }
+                            }
                         } else {
                             self.report_error(&expr.span, &format!("Undefined variable '{}'", name));
                             TypeInfo::Unknown
@@ -617,6 +806,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     PrimaryExpr::Grouped(inner) => {
                         self.analyze_expression(inner)
                     }
+                    PrimaryExpr::NoneLiteral => TypeInfo::None,
                 }
             }
         }
@@ -626,6 +816,7 @@ impl<'a> SemanticAnalyzer<'a> {
         match &expr.node {
             Expression::Primary(PrimaryExpr::Identifier(name)) => Some(name.clone()),
             Expression::Property(prop_access) => self.get_root_identifier(&prop_access.object),
+            Expression::Deref(inner) => self.get_root_identifier(inner),
             _ => None,
         }
     }

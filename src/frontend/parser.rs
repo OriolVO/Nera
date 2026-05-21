@@ -316,6 +316,20 @@ impl<'a> Parser<'a> {
         let start_span = self.current_token.span.clone();
         let mut end_span = start_span.clone();
 
+        let mut is_nullable = false;
+        if self.current_token.kind == TokenKind::Question {
+            is_nullable = true;
+            self.advance();
+            end_span = self.current_token.span.clone();
+        }
+
+        let mut is_ptr = false;
+        if self.current_token.kind == TokenKind::Caret {
+            is_ptr = true;
+            self.advance();
+            end_span = self.current_token.span.clone(); // in case it fails next
+        }
+
         let name = match &self.current_token.kind {
             TokenKind::Identifier(name) => name.clone(),
             _ => {
@@ -339,7 +353,7 @@ impl<'a> Parser<'a> {
         }
 
         let span = start_span.merge(&end_span);
-        Some(Spanned::new(Type { name, is_array, array_size }, span))
+        Some(Spanned::new(Type { name, is_array, array_size, is_ptr, is_nullable }, span))
     }
 
     fn parse_block(&mut self) -> Option<Spanned<Block>> {
@@ -690,6 +704,12 @@ impl<'a> Parser<'a> {
                         arguments,
                     })), span);
                 }
+                TokenKind::Caret => {
+                    self.advance();
+                    let end_span = expr.span.clone(); // Can be improved
+                    let span = expr.span.merge(&end_span);
+                    expr = Spanned::new(Expression::Deref(Box::new(expr)), span);
+                }
                 _ => break,
             }
         }
@@ -709,6 +729,7 @@ impl<'a> Parser<'a> {
         while self.current_token.kind != TokenKind::RBrace && self.current_token.kind != TokenKind::Eof {
             let variant_name = match &self.current_token.kind {
                 TokenKind::Identifier(name) => name.clone(),
+                TokenKind::NoneLit => "None".to_string(),
                 _ => {
                     self.report_error(&self.current_token.span.clone(), "Expected variant name in when case");
                     return None;
@@ -766,7 +787,7 @@ impl<'a> Parser<'a> {
         
         self.consume(TokenKind::RBrace, "Expected '}' after when cases")?;
         
-        Some(WhenExpr { target, cases })
+        Some(WhenExpr { target, cases, is_nullable: false })
     }
 
     fn parse_primary_expr(&mut self) -> Option<Spanned<Expression>> {
@@ -797,9 +818,39 @@ impl<'a> Parser<'a> {
                 self.advance();
                 PrimaryExpr::Boolean(false)
             }
+            TokenKind::NoneLit => {
+                self.advance();
+                PrimaryExpr::NoneLiteral
+            }
             TokenKind::When => {
                 let when_expr = self.parse_when_expr()?;
                 return Some(Spanned::new(Expression::When(Box::new(when_expr)), start_span));
+            }
+            TokenKind::Alloc => {
+                let mut end_span = start_span.clone();
+                self.advance();
+                if let Some(ty) = self.parse_type() {
+                    let mut arguments = Vec::new();
+                    if self.current_token.kind == TokenKind::LParen {
+                        self.advance();
+                        if self.current_token.kind != TokenKind::RParen {
+                            arguments.push(self.parse_expression()?);
+                            while self.current_token.kind == TokenKind::Comma {
+                                self.advance();
+                                arguments.push(self.parse_expression()?);
+                            }
+                        }
+                        end_span = self.current_token.span.clone();
+                        self.consume(TokenKind::RParen, "Expected ')' after alloc arguments")?;
+                    } else {
+                        end_span = ty.span.clone();
+                    }
+                    let span = start_span.merge(&end_span);
+                    return Some(Spanned::new(Expression::Alloc(Box::new(AllocExpr { ty, arguments })), span));
+                } else {
+                    self.report_error(&start_span, "Expected type after 'alloc'");
+                    return None;
+                }
             }
 
             TokenKind::LBracket => {

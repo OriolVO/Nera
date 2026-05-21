@@ -39,6 +39,10 @@ impl LLVMGenerator {
                 let inner_llvm = self.type_to_llvm(inner);
                 LLVMType::Pointer(Box::new(inner_llvm))
             }
+            TypeInfo::Pointer(inner) => {
+                let inner_llvm = self.type_to_llvm(inner);
+                LLVMType::Pointer(Box::new(inner_llvm))
+            }
             TypeInfo::Void => LLVMType::Void,
             _ => LLVMType::I64,
         }
@@ -71,10 +75,46 @@ impl LLVMGenerator {
             }
         }
 
+        // Collect vars that are ADT pointer destinations — these must NOT be scalars
+        let mut adt_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for func in &optimized_ir.functions {
+            for block in &func.blocks {
+                for instr in &block.instrs {
+                    if let IRInstruction::ConstructADT(IROperand::Variable(name), _, _) = instr {
+                        adt_vars.insert(name.clone());
+                    }
+                    // Also catch Assign(var, TempReg) where the temp came from ConstructADT
+                    if let IRInstruction::ConstructADT(IROperand::TempReg(_), _, _) = instr {}
+                }
+            }
+        }
+        // We also need to find Assign(var, temp) where temp came from ConstructADT
+        let mut adt_temps: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for func in &optimized_ir.functions {
+            for block in &func.blocks {
+                for instr in &block.instrs {
+                    if let IRInstruction::ConstructADT(IROperand::TempReg(t), _, _) = instr {
+                        adt_temps.insert(*t);
+                    }
+                }
+            }
+        }
+        for func in &optimized_ir.functions {
+            for block in &func.blocks {
+                for instr in &block.instrs {
+                    if let IRInstruction::Assign(IROperand::Variable(name), IROperand::TempReg(t)) = instr {
+                        if adt_temps.contains(t) {
+                            adt_vars.insert(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         self.scalar_vars.clear();
         for instr in &optimized_ir.global_instructions {
             if let IRInstruction::Assign(IROperand::Variable(name), src) = instr {
-                if !matches!(src, IROperand::Void) && !actual_soa_arrays.iter().any(|(n, _)| n == name) {
+                if !matches!(src, IROperand::Void) && !actual_soa_arrays.iter().any(|(n, _)| n == name) && !adt_vars.contains(name) {
                     self.scalar_vars.insert(name.clone());
                 }
             }
@@ -83,7 +123,7 @@ impl LLVMGenerator {
             for block in &func.blocks {
                 for instr in &block.instrs {
                     if let IRInstruction::Assign(IROperand::Variable(name), src) = instr {
-                        if !matches!(src, IROperand::Void) && !actual_soa_arrays.iter().any(|(n, _)| n == name) {
+                        if !matches!(src, IROperand::Void) && !actual_soa_arrays.iter().any(|(n, _)| n == name) && !adt_vars.contains(name) {
                             self.scalar_vars.insert(name.clone());
                         }
                     }
@@ -483,6 +523,78 @@ impl LLVMGenerator {
                     self.temp_map.insert(*t, tag_val);
                 }
             }
+            IRInstruction::Alloc(dest, type_name) => {
+                let alloc_call = self.builder.build_call(
+                    LLVMType::Pointer(Box::new(LLVMType::I8)),
+                    "aligned_alloc",
+                    vec![LLVMValue::ConstI64(32), LLVMValue::ConstI64(64)]
+                );
+                
+                let target_llvm_ty = if let Some(ty) = self.type_env.get(type_name) {
+                    self.type_to_llvm(ty)
+                } else {
+                    LLVMType::I64
+                };
+                
+                let casted_ptr = self.builder.build_bitcast(alloc_call, LLVMType::Pointer(Box::new(target_llvm_ty)));
+                
+                if let IROperand::Variable(name) = dest {
+                    if let Some(dest_ptr) = self.function_params.get(name) {
+                        self.builder.build_store(casted_ptr.clone(), dest_ptr.clone(), None);
+                    } else {
+                        self.function_params.insert(name.clone(), casted_ptr);
+                    }
+                } else if let IROperand::TempReg(t) = dest {
+                    self.temp_map.insert(*t, casted_ptr);
+                }
+            }
+            IRInstruction::LoadPointer(dest, ptr) => {
+                let ptr_val = self.operand_to_value(ptr)?;
+                let loaded_val = self.builder.build_load(ptr_val, None)?;
+                
+                if let IROperand::Variable(name) = dest {
+                    if let Some(dest_ptr) = self.function_params.get(name) {
+                        self.builder.build_store(loaded_val.clone(), dest_ptr.clone(), None);
+                    } else {
+                        self.function_params.insert(name.clone(), loaded_val);
+                    }
+                } else if let IROperand::TempReg(t) = dest {
+                    self.temp_map.insert(*t, loaded_val);
+                }
+            }
+            IRInstruction::StorePointer(dest_ptr, source_val) => {
+                let ptr_val = self.operand_to_value(dest_ptr)?;
+                let val_val = self.operand_to_value(source_val)?;
+                self.builder.build_store(val_val, ptr_val, None);
+            }
+            IRInstruction::ConstructADT(dest, expected_tag, args) => {
+                let alloc_call = self.builder.build_call(
+                    LLVMType::Pointer(Box::new(LLVMType::I8)),
+                    "aligned_alloc",
+                    vec![LLVMValue::ConstI64(32), LLVMValue::ConstI64(64)]
+                );
+                let ptr = self.builder.build_bitcast(alloc_call, LLVMType::Pointer(Box::new(LLVMType::I64)));
+                
+                let tag_ptr = self.builder.build_gep(LLVMType::I64, ptr.clone(), vec![LLVMValue::ConstI64(0)])?;
+                self.builder.build_store(LLVMValue::ConstI64(*expected_tag), tag_ptr, None);
+                
+                for (i, arg) in args.iter().enumerate() {
+                    let arg_val = self.operand_to_value(arg)?;
+                    let offset = i as i64 + 1;
+                    
+                    let arg_ptr = self.builder.build_gep(LLVMType::I64, ptr.clone(), vec![LLVMValue::ConstI64(offset)])?;
+                    let arg_type = arg_val.get_type();
+                    let casted_arg_ptr = self.builder.build_bitcast(arg_ptr, LLVMType::Pointer(Box::new(arg_type)));
+                    self.builder.build_store(arg_val, casted_arg_ptr, None);
+                }
+                
+                // Always store the pointer directly (never via alloca) — ADT vars are excluded from scalar_vars
+                if let IROperand::TempReg(t) = dest {
+                    self.temp_map.insert(*t, ptr.clone());
+                } else if let IROperand::Variable(name) = dest {
+                    self.function_params.insert(name.clone(), ptr.clone());
+                }
+            }
             IRInstruction::ExtractPayload(dest, target_struct, payload_index) => {
                 let target_val = self.operand_to_value(target_struct)?;
                 let offset = *payload_index as i64 + 1;
@@ -544,6 +656,7 @@ impl LLVMGenerator {
                 }
             },
             IROperand::Void => Ok(LLVMValue::Null(LLVMType::Void)),
+            IROperand::NoneLiteral => Ok(LLVMValue::Null(LLVMType::Pointer(Box::new(LLVMType::I8)))),
         }
     }
 }

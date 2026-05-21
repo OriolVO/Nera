@@ -12,6 +12,7 @@ pub enum IROperand {
     Variable(String),
     TempReg(usize),
     Void,
+    NoneLiteral,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,7 +47,11 @@ pub enum IRInstruction {
     Call(Option<IROperand>, IROperand, Vec<IROperand>), // dest_opt, callee, arguments
     FlatVectorApply(String, String, AssignOp, IROperand, i64), // target_array, property, op, right_operand, size
     ExtractTag(IROperand, IROperand), // dest, target_struct
-    ExtractPayload(IROperand, IROperand, usize), // dest, target_struct, payload_index
+    ExtractPayload(IROperand, IROperand, usize),
+    ConstructADT(IROperand, i64, Vec<IROperand>), // dest, choice_name, variant_name, args // dest, target_struct, payload_index
+    Alloc(IROperand, String), // dest, type_name
+    LoadPointer(IROperand, IROperand), // dest, source_ptr
+    StorePointer(IROperand, IROperand), // dest_ptr, source_val
 }
 
 pub struct IRGenerator {
@@ -291,6 +296,9 @@ impl IRGenerator {
                         prop_access.property.clone(),
                         final_val,
                     ));
+                } else if let Expression::Deref(inner_expr) = &assignment.target.node {
+                    let ptr_val = self.generate_expression(inner_expr);
+                    self.emit(IRInstruction::StorePointer(ptr_val, final_val));
                 } else if let Expression::Primary(PrimaryExpr::Identifier(name)) = &assignment.target.node {
                     self.emit(IRInstruction::Assign(
                         IROperand::Variable(name.clone()),
@@ -428,6 +436,39 @@ impl IRGenerator {
                 ));
                 dest
             }
+                        Expression::VariantConstruct(var_construct) => {
+                let dest = self.new_temp();
+                let mut args = Vec::new();
+                for arg in &var_construct.arguments {
+                    args.push(self.generate_expression(arg));
+                }
+                
+                let mut expected_tag = 0;
+                for tags in self.choice_tags.values() {
+                    if let Some(tag) = tags.get(&var_construct.variant_name) {
+                        expected_tag = *tag;
+                        break;
+                    }
+                }
+                
+                self.emit(IRInstruction::ConstructADT(
+                    dest.clone(),
+                    expected_tag,
+                    args,
+                ));
+                dest
+            }
+            Expression::Alloc(alloc_expr) => {
+                let dest = self.new_temp();
+                self.emit(IRInstruction::Alloc(dest.clone(), alloc_expr.ty.node.name.clone()));
+                dest
+            }
+            Expression::Deref(inner_expr) => {
+                let ptr_val = self.generate_expression(inner_expr);
+                let dest = self.new_temp();
+                self.emit(IRInstruction::LoadPointer(dest.clone(), ptr_val));
+                dest
+            }
             Expression::Primary(primary) => {
                 match primary {
                     PrimaryExpr::Integer(val) => IROperand::LiteralInt(*val),
@@ -439,22 +480,83 @@ impl IRGenerator {
                     PrimaryExpr::ListLiteral(_) => {
                         IROperand::Void
                     }
+                    PrimaryExpr::NoneLiteral => IROperand::NoneLiteral,
                 }
             }
             Expression::When(when_expr) => {
                 let target_op = self.generate_expression(&when_expr.target);
                 let dest_temp = self.new_temp();
-                
+                let end_label = self.new_label("when_end");
+
+                if when_expr.is_nullable {
+                    let cmp_res = self.new_temp();
+                    self.emit(IRInstruction::BinaryOp(
+                        cmp_res.clone(),
+                        BinaryOp::Eq,
+                        target_op.clone(),
+                        IROperand::NoneLiteral,
+                    ));
+                    
+                    let none_label = self.new_label("when_none");
+                    let val_label = self.new_label("when_val");
+                    self.finish_block(Terminator::Branch(cmp_res, none_label.clone(), val_label.clone()));
+                    
+                    // Generate None case
+                    self.start_block(none_label);
+                    for case in &when_expr.cases {
+                        if case.variant_name == "None" {
+                            for (i, stmt) in case.body.node.statements.iter().enumerate() {
+                                if i == case.body.node.statements.len() - 1 {
+                                    if let Statement::Expr(expr) = &stmt.node {
+                                        let val = self.generate_expression(expr);
+                                        self.emit(IRInstruction::Assign(dest_temp.clone(), val));
+                                    } else {
+                                        self.generate_statement(stmt);
+                                    }
+                                } else {
+                                    self.generate_statement(stmt);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    self.finish_block(Terminator::Jump(end_label.clone()));
+                    
+                    // Generate Val case
+                    self.start_block(val_label);
+                    for case in &when_expr.cases {
+                        if case.variant_name != "None" {
+                            self.emit(IRInstruction::Assign(
+                                IROperand::Variable(case.variant_name.clone()),
+                                target_op.clone(),
+                            ));
+                            for (i, stmt) in case.body.node.statements.iter().enumerate() {
+                                if i == case.body.node.statements.len() - 1 {
+                                    if let Statement::Expr(expr) = &stmt.node {
+                                        let val = self.generate_expression(expr);
+                                        self.emit(IRInstruction::Assign(dest_temp.clone(), val));
+                                    } else {
+                                        self.generate_statement(stmt);
+                                    }
+                                } else {
+                                    self.generate_statement(stmt);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    self.finish_block(Terminator::Jump(end_label.clone()));
+                    self.start_block(end_label);
+                    return dest_temp;
+                }
+
                 let tag_temp = self.new_temp();
                 self.emit(IRInstruction::ExtractTag(tag_temp.clone(), target_op.clone()));
-                
-                let end_label = self.new_label("when_end");
                 
                 for case in &when_expr.cases {
                     let case_label = self.new_label("when_case");
                     let next_label = self.new_label("when_next");
                     
-                    // We assume variants are uniquely named across all choices or just search for it
                     let mut expected_tag = 0;
                     for tags in self.choice_tags.values() {
                         if let Some(tag) = tags.get(&case.variant_name) {
@@ -499,7 +601,6 @@ impl IRGenerator {
                 // Fallback / end of match
                 self.emit(IRInstruction::Assign(dest_temp.clone(), IROperand::Void));
                 self.finish_block(Terminator::Jump(end_label.clone()));
-                
                 self.start_block(end_label);
                 dest_temp
             }

@@ -44,6 +44,10 @@ pub enum TokenKind {
     Div,          // /
     Pipe,         // >>
     Arrow,        // ->
+    Caret,        // ^
+    Alloc,        // alloc
+    Question,     // ?
+    NoneLit,      // None
 
     // Delimiters
     LBrace,       // {
@@ -153,6 +157,8 @@ impl<'a> Lexer<'a> {
             "false" => TokenKind::False,
             "choice" => TokenKind::Choice,
             "when" => TokenKind::When,
+            "alloc" => TokenKind::Alloc,
+            "None" => TokenKind::NoneLit,
             "and" => TokenKind::And,
             "or" => TokenKind::Or,
             _ => TokenKind::Identifier(ident),
@@ -247,6 +253,8 @@ impl<'a> Lexer<'a> {
             ':' => TokenKind::Colon,
             ',' => TokenKind::Comma,
             '.' => TokenKind::Dot,
+            '^' => TokenKind::Caret,
+            '?' => TokenKind::Question,
             '=' => {
                 if let Some(&'=') = self.peek() {
                     self.advance();

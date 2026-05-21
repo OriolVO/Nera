@@ -74,6 +74,8 @@ pub struct Type {
     pub name: String,
     pub is_array: bool,
     pub array_size: Option<i64>, // Only relevant if is_array is true. None means dynamic [].
+    pub is_ptr: bool,
+    pub is_nullable: bool,
 }
 
 /// A block of statements enclosed in curly braces.
@@ -137,6 +139,13 @@ pub enum ElseBranch {
 
 /// A while loop.
 #[derive(Debug, Clone, PartialEq)]
+pub struct VariantConstructExpr {
+    pub choice_name: String,
+    pub variant_name: String,
+    pub arguments: Vec<Spanned<Expression>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct WhileStmt {
     pub condition: Spanned<Expression>,
     pub block: Spanned<Block>,
@@ -155,15 +164,25 @@ pub enum Expression {
     Property(Box<PropertyAccess>),
     Call(Box<FunctionCall>),
     When(Box<WhenExpr>),
+    Alloc(Box<AllocExpr>),
+    Deref(Box<Spanned<Expression>>),
+    VariantConstruct(Box<VariantConstructExpr>),
     Primary(PrimaryExpr),
 }
 
 
 /// A when expression for pattern matching.
 #[derive(Debug, Clone, PartialEq)]
+pub struct AllocExpr {
+    pub ty: Spanned<Type>,
+    pub arguments: Vec<Spanned<Expression>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct WhenExpr {
     pub target: Spanned<Expression>,
     pub cases: Vec<WhenCase>,
+    pub is_nullable: bool,
 }
 
 /// A case inside a when expression.
@@ -202,6 +221,7 @@ pub enum PrimaryExpr {
     String(String),
     Boolean(bool),
     ListLiteral(Vec<Spanned<Expression>>),
+    NoneLiteral,
     Grouped(Box<Spanned<Expression>>),
 }
 

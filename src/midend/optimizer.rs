@@ -116,6 +116,23 @@ impl IROptimizer {
                 add_use(obj);
                 add_def(dest);
             }
+            IRInstruction::Alloc(dest, _) => {
+                add_def(dest);
+            }
+            IRInstruction::LoadPointer(dest, ptr) => {
+                add_use(ptr);
+                add_def(dest);
+            }
+            IRInstruction::StorePointer(ptr, val) => {
+                add_use(ptr);
+                add_use(val);
+            }
+            IRInstruction::ConstructADT(dest, _, args) => {
+                for arg in args {
+                    add_use(arg);
+                }
+                add_def(dest);
+            }
         }
         (uses, defs)
     }

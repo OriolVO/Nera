@@ -1,0 +1,12 @@
+fn main() {
+    mut opt_ptr: ?^Int = None
+    if opt_ptr != None {
+        print(opt_ptr^) 
+    }
+    
+    opt_ptr = alloc Int()
+    if opt_ptr != None {
+        opt_ptr^ = 42
+        print(opt_ptr^)
+    }
+}

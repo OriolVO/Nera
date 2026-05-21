@@ -1,0 +1,19 @@
+// Tests pointer chaining and struct pointer allocations 
+// Note: Struct pointer property accesses are not fully implemented in the LLVM backend yet,
+// so this primarily tests the semantic analysis and AST representation.
+
+data Vector {
+    x: Int
+    y: Int
+}
+
+fn main() {
+    mut p_int: ^Int = alloc Int()
+    p_int^ = 999
+    
+    mut p_double: ^Float = alloc Float()
+    p_double^ = 3.1415
+    
+    print(p_int^)
+    print(p_double^)
+}

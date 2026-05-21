@@ -1,0 +1,44 @@
+// Test 13: Using the 'when' pattern matching syntax
+// This file demonstrates the syntax for both ADTs and Nullables.
+
+// 1. Conventional 'choice' (Algebraic Data Type)
+choice OptionalValue {
+    Value(Int)
+    Empty
+}
+
+fn process_choice() {
+    // Note: Variant constructors (e.g. alloc OptionalValue.Value(5)) are slated for Phase 2.5
+    // so we cannot instantiate this choice at runtime yet, but the when syntax is fully supported:
+    
+    mut my_val = OptionalValue.Value(42)
+    when my_val {
+        Value(v) -> { print(v) }
+        Empty -> { print(0) }
+    }
+}
+
+// 2. The specific case of Native Nullables (?Type)
+fn process_nullable() {
+    mut opt_ptr: ?^Int = None
+    
+    // Assigning a value
+    opt_ptr = alloc Int()
+    if opt_ptr != None {
+        opt_ptr^ = 999
+    }
+    
+    // Using 'when' to match on a Nullable type
+    // (Note: To execute this at runtime, the compiler's Midend needs an update to 
+    // distinguish between ADTs and Nullables during IR Generation)
+    
+    when opt_ptr {
+        None -> { print(0) }
+        val -> { print(val^) }
+    }
+}
+
+fn main() {
+    process_choice()
+    process_nullable()
+}

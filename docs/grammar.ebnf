@@ -1,44 +1,62 @@
 /* ===================================================
-   NERA GRAMMAR v1.2 (Production & Sincronized)
+   NERA GRAMMAR v1.5 (Production & Synchronized)
+   Last updated: Phase 2.5 – ADT Variant Constructors
    =================================================== */
 
 Program         ::= Declaration*
 
 Declaration     ::= DataDecl | ChoiceDecl | FnDecl | VarDecl
 
-/* --- ESTRUCTURES DE DADES --- */
+
+/* --- DATA STRUCTURES --- */
+
 DataDecl        ::= "data" Identifier "{" FieldDecl* "}"
 FieldDecl       ::= Identifier ":" Type
+
+
+/* --- ALGEBRAIC DATA TYPES --- */
 
 ChoiceDecl      ::= "choice" Identifier "{" (VariantDecl ","?)* "}"
 VariantDecl     ::= Identifier ("(" Type ("," Type)* ")")?
 
-/* --- FUNCIONS --- */
+
+/* --- FUNCTIONS --- */
+
 FnDecl          ::= "fn" Identifier "(" ParamList? ")" ("->" Type)? Block
 ParamList       ::= Param ("," Param)*
 Param           ::= "mut"? Identifier ":" Type
 
-/* --- TIPUS --- */
-Type            ::= Identifier ("[" Integer? "]")?
 
-/* --- BLOCS I INSTRUCCIONS --- */
+/* --- TYPES ---
+   ^T         = explicit pointer to T (heap-allocated)
+   ?T         = nullable T (None | T); zero-overhead null pointer for pointers
+   T[N]       = fixed-length array of N elements of type T
+   T[]        = dynamically-sized array (slice) of T
+*/
+Type            ::= "?"? "^"? Identifier ("[" Integer? "]")?
+
+
+/* --- BLOCKS & STATEMENTS --- */
+
 Block           ::= "{" Statement* "}"
 
-Statement       ::= VarDecl 
-                  | Assignment 
-                  | IfStmt 
+Statement       ::= VarDecl
+                  | Assignment
+                  | IfStmt
                   | WhileStmt
-                  | ReturnStmt 
+                  | ReturnStmt
                   | ExprStmt
 
 VarDecl         ::= ("let" | "mut") Identifier (":" Type)? "=" Expression
 Assignment      ::= Expression ("=" | "+=" | "-=" | "*=" | "/=") Expression
 IfStmt          ::= "if" Expression Block ("else" IfStmt | "else" Block)?
-WhileStmt       ::= "while" Expression Block 
+WhileStmt       ::= "while" Expression Block
 ReturnStmt      ::= "return" Expression?
 ExprStmt        ::= Expression
 
-/* --- EXPRESSIONS (Ordre de prioritat de menor a major) --- */
+
+/* --- EXPRESSIONS (precedence: lowest → highest) --- */
+
 Expression      ::= PipeExpr
 
 PipeExpr        ::= LogicalExpr (">>" LogicalExpr)*
@@ -48,25 +66,63 @@ RelationalExpr  ::= AdditiveExpr (("<" | "<=" | ">" | ">=") AdditiveExpr)*
 AdditiveExpr    ::= MultiplicativeExpr (("+" | "-") MultiplicativeExpr)*
 MultiplicativeExpr ::= PostfixExpr (("*" | "/") PostfixExpr)*
 
-/* Operadors Postfix: resol els mètodes encadenats i propietats en bucle */
-PostfixExpr     ::= PrimaryExpr ( "." Identifier | "(" ArgumentList? ")" )*
+/* Postfix operators (left-associative, chained in a loop):
+     expr.field          – field / property access
+     expr.method(args)   – method-style call (desugared to free fn call in sema)
+     ChoiceName.Variant  – zero-arg variant constructor  (resolved in sema)
+     ChoiceName.Variant(args) – variant constructor with payload (resolved in sema)
+     expr(args)          – direct function call
+     expr^               – pointer dereference
+*/
+PostfixExpr     ::= PrimaryExpr ( "." Identifier ( "(" ArgumentList? ")" )?
+                                 | "(" ArgumentList? ")"
+                                 | "^"
+                                 )*
 
-PrimaryExpr     ::= Identifier 
-                  | Literal 
+PrimaryExpr     ::= Identifier
+                  | Literal
                   | ListLiteral
                   | WhenExpr
+                  | AllocExpr
                   | "(" Expression ")"
 
 ArgumentList    ::= Expression ("," Expression)*
 
-WhenExpr        ::= "when" Expression "{" (WhenCase ","?)* "}"
-WhenCase        ::= Identifier ("(" Identifier ("," Identifier)* ")")? "->" Block
 
-/* --- BASIC ELEMENTS --- */
+/* --- HEAP ALLOCATION ---
+   alloc T()       allocates a value of type T on the heap.
+   alloc T(args)   allocates and initialises fields (data types only).
+   Returns ^T.
+*/
+AllocExpr       ::= "alloc" Type ("(" ArgumentList? ")")?
+
+
+/* --- PATTERN MATCHING ---
+   when targets both 'choice' ADTs and nullable '?T' types.
+   For nullable types, use None / val catch-all syntax.
+   For ADT types, every variant arm must be listed.
+   The final arm may be a bare Identifier to catch remaining values.
+*/
+WhenExpr        ::= "when" Expression "{" WhenCase+ "}"
+WhenCase        ::= WhenPattern "->" Block
+WhenPattern     ::= "None"                                        /* nullable null arm   */
+                  | Identifier "(" Identifier ("," Identifier)* ")"  /* variant with binding */
+                  | Identifier                                    /* variant no-payload or catch-all */
+
+
+/* --- LITERALS --- */
+
 ListLiteral     ::= "[" ArgumentList? "]"
-Identifier      ::= [a-zA-Z_] [a-zA-Z0-9_]*
-Literal         ::= Integer | Float | String | Boolean
+Literal         ::= Integer | Float | String | Boolean | NoneLiteral
+NoneLiteral     ::= "None"                  /* null value for ?T nullable types */
 Integer         ::= [0-9]+
 Float           ::= [0-9]+ "." [0-9]+
 String          ::= '"' [^"]* '"'
 Boolean         ::= "true" | "false"
+
+
+/* --- LEXICAL ELEMENTS --- */
+
+Identifier      ::= [a-zA-Z_] [a-zA-Z0-9_]*
+LineComment     ::= "//" [^\n]*
+BlockComment    ::= "/*" .* "*/"
