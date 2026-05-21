@@ -17,6 +17,7 @@ pub struct ImportDirective {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Declaration {
     Data(DataDecl),
+    Choice(ChoiceDecl),
     Fn(FnDecl),
     Var(VarDecl),
 }
@@ -33,6 +34,21 @@ pub struct DataDecl {
 pub struct FieldDecl {
     pub name: String,
     pub ty: Spanned<Type>,
+}
+
+
+/// A choice declaration (ADT), e.g., `choice Option { Some(T), None }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChoiceDecl {
+    pub name: String,
+    pub variants: Vec<VariantDecl>,
+}
+
+/// A variant of a choice declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariantDecl {
+    pub name: String,
+    pub associated_types: Vec<Spanned<Type>>, // Empty if no data is associated
 }
 
 /// A function declaration, e.g. `fn move_particle(p: mut Particle) -> Void { ... }`
@@ -138,7 +154,24 @@ pub enum Expression {
     Binary(Box<BinaryExpr>),
     Property(Box<PropertyAccess>),
     Call(Box<FunctionCall>),
+    When(Box<WhenExpr>),
     Primary(PrimaryExpr),
+}
+
+
+/// A when expression for pattern matching.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WhenExpr {
+    pub target: Spanned<Expression>,
+    pub cases: Vec<WhenCase>,
+}
+
+/// A case inside a when expression.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WhenCase {
+    pub variant_name: String,
+    pub bindings: Vec<String>,
+    pub body: Spanned<Block>,
 }
 
 /// A binary expression (combines logical, equality, relational, additive, multiplicative, pipe).

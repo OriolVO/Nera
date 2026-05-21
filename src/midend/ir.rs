@@ -1,6 +1,7 @@
 use crate::frontend::ast::{AssignOp, BinaryOp, Block, Declaration, Expression, IfStmt, PrimaryExpr, Program, Statement, WhileStmt, ElseBranch};
 use crate::frontend::diagnostics::Spanned;
 use std::collections::HashMap;
+use crate::error::CompileError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum IROperand {
@@ -44,6 +45,8 @@ pub enum IRInstruction {
     StoreProperty(IROperand, String, IROperand), // object, property, value
     Call(Option<IROperand>, IROperand, Vec<IROperand>), // dest_opt, callee, arguments
     FlatVectorApply(String, String, AssignOp, IROperand, i64), // target_array, property, op, right_operand, size
+    ExtractTag(IROperand, IROperand), // dest, target_struct
+    ExtractPayload(IROperand, IROperand, usize), // dest, target_struct, payload_index
 }
 
 pub struct IRGenerator {
@@ -55,6 +58,7 @@ pub struct IRGenerator {
     data_structs: HashMap<String, Vec<String>>,
     array_params: HashMap<String, String>, // Tracks array param variables to their type name
     array_sizes: HashMap<String, i64>, // Tracks dynamic array sizes
+    pub choice_tags: HashMap<String, HashMap<String, i64>>, // ChoiceName -> VariantName -> Tag
     pub global_instructions: Vec<IRInstruction>, // for global vars, but we can just use main or init
 }
 
@@ -69,8 +73,26 @@ impl IRGenerator {
             data_structs: HashMap::new(),
             array_params: HashMap::new(),
             array_sizes: HashMap::new(),
+            choice_tags: HashMap::new(),
             global_instructions: Vec::new(),
         }
+    }
+
+    pub fn generate(&mut self, program: &Program) -> Result<(), CompileError> {
+        for decl in &program.declarations {
+            if let Declaration::Data(data_decl) = &decl.node {
+                let mut fields = Vec::new();
+                for field in &data_decl.fields {
+                    fields.push(field.name.clone());
+                }
+                self.data_structs.insert(data_decl.name.clone(), fields);
+            }
+        }
+
+        for decl in &program.declarations {
+            self.generate_declaration(decl);
+        }
+        Ok(())
     }
 
     fn new_temp(&mut self) -> IROperand {
@@ -117,22 +139,6 @@ impl IRGenerator {
             instrs: Vec::new(),
             terminator: Terminator::None,
         });
-    }
-
-    pub fn generate(&mut self, program: &Program) {
-        for decl in &program.declarations {
-            if let Declaration::Data(data_decl) = &decl.node {
-                let mut fields = Vec::new();
-                for field in &data_decl.fields {
-                    fields.push(field.name.clone());
-                }
-                self.data_structs.insert(data_decl.name.clone(), fields);
-            }
-        }
-
-        for decl in &program.declarations {
-            self.generate_declaration(decl);
-        }
     }
 
     fn generate_declaration(&mut self, decl: &Spanned<Declaration>) {
@@ -211,6 +217,13 @@ impl IRGenerator {
                 ));
             }
             Declaration::Data(_) => {}
+            Declaration::Choice(choice_decl) => {
+                let mut tag_map = HashMap::new();
+                for (i, variant) in choice_decl.variants.iter().enumerate() {
+                    tag_map.insert(variant.name.clone(), i as i64);
+                }
+                self.choice_tags.insert(choice_decl.name.clone(), tag_map);
+            }
         }
     }
 
@@ -240,7 +253,7 @@ impl IRGenerator {
                 if let Expression::Property(prop_access) = &assignment.target.node {
                     if let Expression::Primary(PrimaryExpr::Identifier(target_array)) = &prop_access.object.node {
                         let right_val = self.generate_expression(&assignment.value);
-                        let size = *self.array_sizes.get(target_array).unwrap_or(&100000); // 100000 per precaució
+                        let size = *self.array_sizes.get(target_array).unwrap_or(&0); // 100000 per precaució
                         self.emit(IRInstruction::FlatVectorApply(
                             target_array.clone(),
                             prop_access.property.clone(),
@@ -427,6 +440,68 @@ impl IRGenerator {
                         IROperand::Void
                     }
                 }
+            }
+            Expression::When(when_expr) => {
+                let target_op = self.generate_expression(&when_expr.target);
+                let dest_temp = self.new_temp();
+                
+                let tag_temp = self.new_temp();
+                self.emit(IRInstruction::ExtractTag(tag_temp.clone(), target_op.clone()));
+                
+                let end_label = self.new_label("when_end");
+                
+                for case in &when_expr.cases {
+                    let case_label = self.new_label("when_case");
+                    let next_label = self.new_label("when_next");
+                    
+                    // We assume variants are uniquely named across all choices or just search for it
+                    let mut expected_tag = 0;
+                    for tags in self.choice_tags.values() {
+                        if let Some(tag) = tags.get(&case.variant_name) {
+                            expected_tag = *tag;
+                            break;
+                        }
+                    }
+                    
+                    let cmp_res = self.new_temp();
+                    self.emit(IRInstruction::BinaryOp(
+                        cmp_res.clone(),
+                        BinaryOp::Eq,
+                        tag_temp.clone(),
+                        IROperand::LiteralInt(expected_tag),
+                    ));
+                    
+                    self.finish_block(Terminator::Branch(cmp_res, case_label.clone(), next_label.clone()));
+                    self.start_block(case_label);
+                    
+                    for (i, binding) in case.bindings.iter().enumerate() {
+                        let bind_var = IROperand::Variable(binding.clone());
+                        self.emit(IRInstruction::ExtractPayload(bind_var, target_op.clone(), i));
+                    }
+                    
+                    for (i, stmt) in case.body.node.statements.iter().enumerate() {
+                        if i == case.body.node.statements.len() - 1 {
+                            if let Statement::Expr(expr) = &stmt.node {
+                                let val = self.generate_expression(expr);
+                                self.emit(IRInstruction::Assign(dest_temp.clone(), val));
+                            } else {
+                                self.generate_statement(stmt);
+                            }
+                        } else {
+                            self.generate_statement(stmt);
+                        }
+                    }
+                    
+                    self.finish_block(Terminator::Jump(end_label.clone()));
+                    self.start_block(next_label);
+                }
+                
+                // Fallback / end of match
+                self.emit(IRInstruction::Assign(dest_temp.clone(), IROperand::Void));
+                self.finish_block(Terminator::Jump(end_label.clone()));
+                
+                self.start_block(end_label);
+                dest_temp
             }
         }
     }

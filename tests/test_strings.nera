@@ -1,0 +1,8 @@
+fn print_string(s: String) -> Void {
+    // dummy use
+}
+
+fn main() {
+    let msg: String = "Hello via Global Strings"
+    print_string(msg)
+}

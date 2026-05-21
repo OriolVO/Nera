@@ -15,6 +15,8 @@ pub enum TokenKind {
     Use,
     True,
     False,
+    Choice,
+    When,
     And,
     Or,
 
@@ -149,6 +151,8 @@ impl<'a> Lexer<'a> {
             "use" => TokenKind::Use,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
+            "choice" => TokenKind::Choice,
+            "when" => TokenKind::When,
             "and" => TokenKind::And,
             "or" => TokenKind::Or,
             _ => TokenKind::Identifier(ident),

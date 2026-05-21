@@ -144,6 +144,7 @@ impl<'a> Parser<'a> {
         
         let decl = match self.current_token.kind {
             TokenKind::Data => Declaration::Data(self.parse_data_decl()?),
+            TokenKind::Choice => Declaration::Choice(self.parse_choice_decl()?),
             TokenKind::Fn => Declaration::Fn(self.parse_fn_decl()?),
             TokenKind::Let | TokenKind::Mut => Declaration::Var(self.parse_var_decl()?),
             _ => {
@@ -153,6 +154,60 @@ impl<'a> Parser<'a> {
         };
 
         Some(Spanned::new(decl, start_span))
+    }
+
+
+    fn parse_choice_decl(&mut self) -> Option<ChoiceDecl> {
+        self.consume(TokenKind::Choice, "Expected 'choice'")?;
+        
+        let name = match &self.current_token.kind {
+            TokenKind::Identifier(name) => name.clone(),
+            _ => {
+                self.report_error(&self.current_token.span.clone(), "Expected identifier for choice name");
+                return None;
+            }
+        };
+        self.advance(); // consume identifier
+
+        self.consume(TokenKind::LBrace, "Expected '{' before choice body")?;
+
+        let mut variants = Vec::new();
+        while self.current_token.kind != TokenKind::RBrace && self.current_token.kind != TokenKind::Eof {
+            let variant_name = match &self.current_token.kind {
+                TokenKind::Identifier(name) => name.clone(),
+                _ => {
+                    self.report_error(&self.current_token.span.clone(), "Expected identifier for variant name");
+                    return None;
+                }
+            };
+            self.advance();
+
+            let mut associated_types = Vec::new();
+            if self.current_token.kind == TokenKind::LParen {
+                self.advance(); // consume '('
+                if self.current_token.kind != TokenKind::RParen {
+                    associated_types.push(self.parse_type()?);
+                    while self.current_token.kind == TokenKind::Comma {
+                        self.advance(); // consume ','
+                        if self.current_token.kind != TokenKind::RParen {
+                            associated_types.push(self.parse_type()?);
+                        }
+                    }
+                }
+                self.consume(TokenKind::RParen, "Expected ')' after associated types")?;
+            }
+
+            variants.push(VariantDecl { name: variant_name, associated_types });
+
+            // Optional comma between variants
+            if self.current_token.kind == TokenKind::Comma {
+                self.advance();
+            }
+        }
+
+        self.consume(TokenKind::RBrace, "Expected '}' after choice body")?;
+
+        Some(ChoiceDecl { name, variants })
     }
 
     fn parse_data_decl(&mut self) -> Option<DataDecl> {
@@ -642,6 +697,78 @@ impl<'a> Parser<'a> {
         Some(expr)
     }
 
+
+    fn parse_when_expr(&mut self) -> Option<WhenExpr> {
+        self.consume(TokenKind::When, "Expected 'when'")?;
+        
+        let target = self.parse_expression()?;
+        
+        self.consume(TokenKind::LBrace, "Expected '{' before when cases")?;
+        
+        let mut cases = Vec::new();
+        while self.current_token.kind != TokenKind::RBrace && self.current_token.kind != TokenKind::Eof {
+            let variant_name = match &self.current_token.kind {
+                TokenKind::Identifier(name) => name.clone(),
+                _ => {
+                    self.report_error(&self.current_token.span.clone(), "Expected variant name in when case");
+                    return None;
+                }
+            };
+            self.advance(); // consume variant name
+
+            let mut bindings = Vec::new();
+            if self.current_token.kind == TokenKind::LParen {
+                self.advance(); // consume '('
+                if self.current_token.kind != TokenKind::RParen {
+                    let binding_name = match &self.current_token.kind {
+                        TokenKind::Identifier(name) => name.clone(),
+                        _ => {
+                            self.report_error(&self.current_token.span.clone(), "Expected identifier for binding");
+                            return None;
+                        }
+                    };
+                    bindings.push(binding_name);
+                    self.advance();
+                    
+                    while self.current_token.kind == TokenKind::Comma {
+                        self.advance(); // consume ','
+                        if self.current_token.kind != TokenKind::RParen {
+                            let binding_name = match &self.current_token.kind {
+                                TokenKind::Identifier(name) => name.clone(),
+                                _ => {
+                                    self.report_error(&self.current_token.span.clone(), "Expected identifier for binding");
+                                    return None;
+                                }
+                            };
+                            bindings.push(binding_name);
+                            self.advance();
+                        }
+                    }
+                }
+                self.consume(TokenKind::RParen, "Expected ')' after bindings")?;
+            }
+
+            self.consume(TokenKind::Arrow, "Expected '->' after when case pattern")?;
+
+            let body = self.parse_block()?;
+
+            cases.push(WhenCase {
+                variant_name,
+                bindings,
+                body,
+            });
+            
+            // Optional comma between cases
+            if self.current_token.kind == TokenKind::Comma {
+                self.advance();
+            }
+        }
+        
+        self.consume(TokenKind::RBrace, "Expected '}' after when cases")?;
+        
+        Some(WhenExpr { target, cases })
+    }
+
     fn parse_primary_expr(&mut self) -> Option<Spanned<Expression>> {
         let start_span = self.current_token.span.clone();
         
@@ -670,6 +797,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 PrimaryExpr::Boolean(false)
             }
+            TokenKind::When => {
+                let when_expr = self.parse_when_expr()?;
+                return Some(Spanned::new(Expression::When(Box::new(when_expr)), start_span));
+            }
+
             TokenKind::LBracket => {
                 self.advance();
                 let mut arguments = Vec::new();

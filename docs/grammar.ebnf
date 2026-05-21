@@ -4,11 +4,14 @@
 
 Program         ::= Declaration*
 
-Declaration     ::= DataDecl | FnDecl | VarDecl
+Declaration     ::= DataDecl | ChoiceDecl | FnDecl | VarDecl
 
 /* --- ESTRUCTURES DE DADES --- */
 DataDecl        ::= "data" Identifier "{" FieldDecl* "}"
 FieldDecl       ::= Identifier ":" Type
+
+ChoiceDecl      ::= "choice" Identifier "{" (VariantDecl ","?)* "}"
+VariantDecl     ::= Identifier ("(" Type ("," Type)* ")")?
 
 /* --- FUNCIONS --- */
 FnDecl          ::= "fn" Identifier "(" ParamList? ")" ("->" Type)? Block
@@ -51,9 +54,13 @@ PostfixExpr     ::= PrimaryExpr ( "." Identifier | "(" ArgumentList? ")" )*
 PrimaryExpr     ::= Identifier 
                   | Literal 
                   | ListLiteral
+                  | WhenExpr
                   | "(" Expression ")"
 
 ArgumentList    ::= Expression ("," Expression)*
+
+WhenExpr        ::= "when" Expression "{" (WhenCase ","?)* "}"
+WhenCase        ::= Identifier ("(" Identifier ("," Identifier)* ")")? "->" Block
 
 /* --- BASIC ELEMENTS --- */
 ListLiteral     ::= "[" ArgumentList? "]"

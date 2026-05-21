@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use crate::error::CompileError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LLVMType {
@@ -33,6 +34,7 @@ impl LLVMType {
 pub enum LLVMValue {
     Reg(String, LLVMType),
     Global(String, LLVMType),
+    ConstGlobalStringPtr(String, usize),
     ConstI1(bool),
     ConstI32(i32),
     ConstI64(i64),
@@ -50,6 +52,7 @@ impl LLVMValue {
             LLVMValue::ConstI64(_) => LLVMType::I64,
             LLVMValue::ConstDouble(_) => LLVMType::Double,
             LLVMValue::Null(t) => t.clone(),
+            LLVMValue::ConstGlobalStringPtr(_, _) => LLVMType::Pointer(Box::new(LLVMType::I8)),
         }
     }
 
@@ -68,6 +71,7 @@ impl LLVMValue {
                 }
             }
             LLVMValue::Null(_) => "null".to_string(),
+            LLVMValue::ConstGlobalStringPtr(name, len) => format!("getelementptr inbounds ([{} x i8], [{} x i8]* @{}, i64 0, i64 0)", len, len, name),
         }
     }
 
@@ -175,6 +179,7 @@ pub struct LLVMModule {
     pub name: String,
     pub funcs: Vec<LLVMFunction>,
     pub declarations: Vec<String>,
+    pub global_strings: Vec<(String, String, usize)>,
 }
 
 pub struct IRBuilder {
@@ -191,6 +196,7 @@ impl IRBuilder {
                 name: module_name.to_string(),
                 funcs: Vec::new(),
                 declarations: Vec::new(),
+                global_strings: Vec::new(),
             },
             active_func: None,
             active_block: None,
@@ -256,25 +262,25 @@ impl IRBuilder {
         LLVMValue::Reg(name.to_string(), LLVMType::Pointer(Box::new(ty)))
     }
 
-    pub fn build_load(&mut self, ptr: LLVMValue, align: Option<usize>) -> LLVMValue {
+    pub fn build_load(&mut self, ptr: LLVMValue, align: Option<usize>) -> Result<LLVMValue, CompileError> {
         let ty = match ptr.get_type() {
             LLVMType::Pointer(inner) => *inner,
-            _ => panic!("build_load on non-pointer"),
+            _ => return Err(CompileError::BackendError("build_load on non-pointer".to_string())), // Handled by outer match
         };
         let dest = self.next_reg_name();
         self.push_instr(LLVMInstruction::Load(dest.clone(), ty.clone(), ptr, align));
-        LLVMValue::Reg(dest, ty)
+        Ok(LLVMValue::Reg(dest, ty))
     }
 
     pub fn build_store(&mut self, val: LLVMValue, ptr: LLVMValue, align: Option<usize>) {
         self.push_instr(LLVMInstruction::Store(val, ptr, align));
     }
 
-    pub fn build_gep(&mut self, base_ty: LLVMType, ptr: LLVMValue, indices: Vec<LLVMValue>) -> LLVMValue {
+    pub fn build_gep(&mut self, base_ty: LLVMType, ptr: LLVMValue, indices: Vec<LLVMValue>) -> Result<LLVMValue, CompileError> {
         let dest = self.next_reg_name();
         let ptr_ty = match ptr.get_type() {
             LLVMType::Pointer(inner) => *inner,
-            _ => panic!("build_gep on non-pointer"),
+            _ => return Err(CompileError::BackendError("build_gep on non-pointer".to_string())), // Handled by outer match
         };
         // Compute return type simplified
         let ret_ty = if let LLVMType::Array(_, inner) = base_ty.clone() {
@@ -287,7 +293,7 @@ impl IRBuilder {
             LLVMType::Pointer(Box::new(base_ty.clone()))
         };
         self.push_instr(LLVMInstruction::GetElementPtr(dest.clone(), base_ty, ptr, indices));
-        LLVMValue::Reg(dest, ret_ty)
+        Ok(LLVMValue::Reg(dest, ret_ty))
     }
 
     pub fn build_add(&mut self, l: LLVMValue, r: LLVMValue) -> LLVMValue {
@@ -428,6 +434,26 @@ impl IRBuilder {
         self.push_instr(LLVMInstruction::Unreachable);
     }
 
+
+    pub fn build_global_string_ptr(&mut self, value: &str) -> LLVMValue {
+        let name = format!(".str.{}", self.module.global_strings.len());
+        // In LLVM, C strings need a null terminator. We assume the string does NOT contain nulls or special escapes yet.
+        // For simplicity, we just use the raw bytes.
+        let mut llvm_str = String::new();
+        for b in value.bytes() {
+            if b >= 32 && b <= 126 && b != b'"' && b != b'\\' {
+                llvm_str.push(b as char);
+            } else {
+                llvm_str.push_str(&format!("\\{:02X}", b));
+            }
+        }
+        llvm_str.push_str("\\00");
+        let length = value.len() + 1;
+        
+        self.module.global_strings.push((name.clone(), llvm_str, length));
+        LLVMValue::ConstGlobalStringPtr(name, length)
+    }
+
     pub fn emit_to_string(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("; ModuleID = '{}'\n", self.module.name));
@@ -437,6 +463,11 @@ impl IRBuilder {
         for decl in &self.module.declarations {
             out.push_str(decl);
             out.push('\n');
+        }
+        out.push('\n');
+
+        for (name, val, len) in &self.module.global_strings {
+            out.push_str(&format!("@{} = private unnamed_addr constant [{} x i8] c\"{}\", align 1\n", name, len, val));
         }
         out.push('\n');
 

@@ -1,5 +1,6 @@
 use std::collections::{HashSet, HashMap};
 use super::ir::{IRInstruction, IROperand, IRFunction, Terminator};
+use crate::error::CompileError;
 
 pub struct OptimizedIR {
     pub functions: Vec<IRFunction>,
@@ -14,7 +15,7 @@ impl IROptimizer {
         Self {}
     }
 
-    pub fn optimize(&self, functions: Vec<IRFunction>, global_instructions: Vec<IRInstruction>) -> OptimizedIR {
+    pub fn optimize(&self, functions: Vec<IRFunction>, global_instructions: Vec<IRInstruction>) -> Result<OptimizedIR, CompileError> {
         let mut soa_arrays = self.run_soa_pass_globals(&global_instructions);
         let mut optimized_functions = Vec::new();
 
@@ -22,18 +23,18 @@ impl IROptimizer {
             let func_soa = self.run_soa_pass_func(&func);
             soa_arrays.extend(func_soa);
 
-            self.run_liveness_and_dce(&mut func);
+            self.run_liveness_and_dce(&mut func)?;
             optimized_functions.push(func);
         }
 
         soa_arrays.sort_by(|a, b| a.0.cmp(&b.0));
         soa_arrays.dedup_by(|a, b| a.0 == b.0);
 
-        OptimizedIR {
+        Ok(OptimizedIR {
             functions: optimized_functions,
             soa_arrays,
             global_instructions,
-        }
+        })
     }
 
     fn run_soa_pass_globals(&self, instructions: &[IRInstruction]) -> Vec<(String, i64)> {
@@ -61,7 +62,7 @@ impl IROptimizer {
     fn operand_to_var(&self, op: &IROperand) -> Option<String> {
         match op {
             IROperand::Variable(name) => Some(name.clone()),
-            IROperand::TempReg(r) => Some(format!("temp_{}", r)),
+            IROperand::TempReg(r) => Some(format!("t{}", r)),
             _ => None,
         }
     }
@@ -107,11 +108,19 @@ impl IROptimizer {
             IRInstruction::FlatVectorApply(_, _, _, val, _) => {
                 add_use(val);
             }
+            IRInstruction::ExtractTag(dest, obj) => {
+                add_use(obj);
+                add_def(dest);
+            }
+            IRInstruction::ExtractPayload(dest, obj, _) => {
+                add_use(obj);
+                add_def(dest);
+            }
         }
         (uses, defs)
     }
 
-    fn run_liveness_and_dce(&self, func: &mut IRFunction) {
+    fn run_liveness_and_dce(&self, func: &mut IRFunction) -> Result<(), CompileError> {
         // 1. Build successors map
         let mut succs: HashMap<String, Vec<String>> = HashMap::new();
         for block in &func.blocks {
@@ -195,21 +204,21 @@ impl IROptimizer {
                     }
                 }
                 
-                let old_out = out_sets.get(name).unwrap().clone();
+                let old_out = out_sets.get(name).ok_or_else(|| CompileError::BackendError(format!("Missing OUT set for block '{}'", name)))?.clone();
                 if new_out != old_out {
                     out_sets.insert(name.clone(), new_out.clone());
                     changed = true;
                 }
 
-                let mut new_in = use_sets.get(name).unwrap().clone();
-                let def = def_sets.get(name).unwrap();
+                let mut new_in = use_sets.get(name).ok_or_else(|| CompileError::BackendError(format!("Missing USE set for block '{}'", name)))?.clone();
+                let def = def_sets.get(name).ok_or_else(|| CompileError::BackendError(format!("Missing DEF set for block '{}'", name)))?;
                 for v in &new_out {
                     if !def.contains(v) {
                         new_in.insert(v.clone());
                     }
                 }
 
-                let old_in = in_sets.get(name).unwrap().clone();
+                let old_in = in_sets.get(name).ok_or_else(|| CompileError::BackendError(format!("Missing IN set for block '{}'", name)))?.clone();
                 if new_in != old_in {
                     in_sets.insert(name.clone(), new_in);
                     changed = true;
@@ -219,7 +228,7 @@ impl IROptimizer {
 
         // 4. Safe DCE Pass
         for block in &mut func.blocks {
-            let mut live_now = out_sets.get(&block.name).unwrap().clone();
+            let mut live_now = out_sets.get(&block.name).ok_or_else(|| CompileError::BackendError(format!("Missing OUT set for block '{}' during DCE", block.name)))?.clone();
             
             match &block.terminator {
                 Terminator::Branch(cond, _, _) => {
@@ -268,5 +277,6 @@ impl IROptimizer {
             optimized_instrs.reverse();
             block.instrs = optimized_instrs;
         }
+        Ok(())
     }
 }

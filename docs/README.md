@@ -26,6 +26,28 @@ let standard_message = "Hello, Nera"
 mut system_status: Int = 200
 system_status = 404
 
+
+### Algebraic Data Types (Choice & When)
+Nera supports variant types via the `choice` keyword, matched exhaustively using `when`.
+
+```nerapos
+choice Option {
+    Some(Int),
+    None
+}
+
+fn print_option(opt: Option) -> Void {
+    when opt {
+        Some(val) -> {
+            print(val)
+        }
+        None -> {
+            print(0)
+        }
+    }
+}
+```
+
 ### Data vs. Logic Separation
 
 ```nerapos

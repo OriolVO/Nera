@@ -2,10 +2,12 @@ use std::env;
 use std::fs;
 use std::process;
 
+mod error;
 mod frontend;
 mod midend;
 mod backend;
 
+use error::CompileError;
 use frontend::lexer::Lexer;
 use frontend::parser::Parser;
 use frontend::sema::SemanticAnalyzer;
@@ -20,105 +22,75 @@ fn print_usage() {
     println!("  nera run <file.nera>       Compile and execute");
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        print_usage();
-        process::exit(1);
-    }
+fn run_compiler(command: &str, filename: &str) -> Result<(), CompileError> {
 
-    let command = &args[1];
-    let filename = &args[2];
-
-    if command != "compile" && command != "run" {
-        eprintln!("Unknown command: {}", command);
-        print_usage();
-        process::exit(1);
-    }
-
-    let source = match fs::read_to_string(filename) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error reading file {}: {}", filename, e);
-            process::exit(1);
-        }
-    };
-
-    // Frontend: Lexing & Parsing
-    let lexer = Lexer::new(&source);
-    let mut parser = Parser::new(&source, lexer);
-    let mut program = parser.parse_program();
-
-    if !parser.errors.is_empty() {
-        eprintln!("\nCompilation aborted due to syntax errors.");
-        process::exit(1);
-    }
+    let source = fs::read_to_string(filename)?;
 
     // Frontend: AST Stitching (Module Imports)
+    let mut visited = std::collections::HashSet::new();
+    let mut pending = vec![filename.to_string()];
     let mut all_declarations = Vec::new();
 
-    for import in &program.imports {
-        let path_str = import.node.path.join("/");
-        let dep_filename = format!("{}.nera", path_str);
+    while let Some(current_file) = pending.pop() {
+        if !visited.insert(current_file.clone()) {
+            continue; // Already processed this file, skip to prevent cyclic loops
+        }
 
-        let dep_source = match fs::read_to_string(&dep_filename) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Error reading imported module {}: {}", dep_filename, e);
-                process::exit(1);
-            }
+        let source = if current_file == filename {
+            source.clone()
+        } else {
+            fs::read_to_string(&current_file)?
         };
+        let source_leaked: &'static str = Box::leak(source.into_boxed_str());
 
-        // Leak the source to keep span metadata valid conceptually
-        let dep_source_leaked: &'static str = Box::leak(dep_source.into_boxed_str());
-        let dep_lexer = Lexer::new(dep_source_leaked);
-        let mut dep_parser = Parser::new(dep_source_leaked, dep_lexer);
-        let mut dep_program = dep_parser.parse_program();
+        let lexer = Lexer::new(source_leaked);
+        let mut parser = Parser::new(source_leaked, lexer);
+        let mut program = parser.parse_program();
 
-        if !dep_parser.errors.is_empty() {
-            eprintln!("\nCompilation aborted due to syntax errors in module {}.", dep_filename);
-            process::exit(1);
+        if !parser.errors.is_empty() {
+            return Err(CompileError::SyntaxError(parser.errors));
         }
 
-        // Prevent cyclic dependencies by ignoring nested imports for now
-        if !dep_program.imports.is_empty() {
-            eprintln!("Warning: Nested imports in {} are not supported in this prototype.", dep_filename);
+        // Queue up nested imports
+        for import in &program.imports {
+            let path_str = import.node.path.join("/");
+            let dep_filename = format!("{}.nera", path_str);
+            pending.push(dep_filename);
         }
 
-        all_declarations.append(&mut dep_program.declarations);
+        all_declarations.append(&mut program.declarations);
     }
 
-    // Append main program declarations last so they can use the dependencies
-    all_declarations.append(&mut program.declarations);
-    program.declarations = all_declarations;
+    // Create a synthetic master program
+    let mut master_program = crate::frontend::ast::Program {
+        imports: Vec::new(),
+        declarations: all_declarations,
+    };
+
 
     // Frontend: Semantic Analysis
     let mut analyzer = SemanticAnalyzer::new(&source);
-    if analyzer.analyze(&mut program).is_err() {
-        eprintln!("\nCompilation aborted due to semantic errors.");
-        process::exit(1);
+    if analyzer.analyze(&mut master_program).is_err() {
+        return Err(CompileError::SemanticError(analyzer.errors));
     }
     let type_env = analyzer.inferred_types.clone();
 
     // Mid-end: IR Generation
     let mut ir_gen = IRGenerator::new();
-    ir_gen.generate(&program);
+    ir_gen.generate(&master_program)?;
 
     // Mid-end: Optimization
     let optimizer = IROptimizer::new();
-    let optimized_ir = optimizer.optimize(ir_gen.functions.clone(), ir_gen.global_instructions.clone());
+    let optimized_ir = optimizer.optimize(ir_gen.functions.clone(), ir_gen.global_instructions.clone())?;
 
     // Backend: LLVM Code Generation
     let mut llvm_gen = LLVMGenerator::new();
-    let llvm_text = llvm_gen.generate(&optimized_ir, type_env);
+    let llvm_text = llvm_gen.generate(&optimized_ir, type_env)?;
 
     // Write .ll file
     let base_name = filename.strip_suffix(".nera").unwrap_or(filename);
     let ll_filename = format!("{}.ll", base_name);
-    if let Err(e) = fs::write(&ll_filename, &llvm_text) {
-        eprintln!("Error writing LLVM IR: {}", e);
-        process::exit(1);
-    }
+    fs::write(&ll_filename, &llvm_text)?;
 
     if command == "run" {
         let bin_filename = if cfg!(windows) {
@@ -133,12 +105,16 @@ fn main() {
             .arg(&ll_filename)
             .arg("-o")
             .arg("/dev/null")
-            .status()
-            .expect("Failed to execute llc. Is llvm installed and in your PATH?");
-
-        if !verify_status.success() {
-            eprintln!("LLVM IR Verification failed. The generated IR is invalid.");
-            process::exit(1);
+            .status();
+            
+        if let Ok(status) = verify_status {
+            if !status.success() {
+                let _ = fs::remove_file(&ll_filename);
+                return Err(CompileError::BackendError("LLVM IR Verification failed. The generated IR is invalid.".to_string()));
+            }
+        } else {
+            let _ = fs::remove_file(&ll_filename);
+            return Err(CompileError::BackendError("Failed to execute llc. Is llvm installed and in your PATH?".to_string()));
         }
 
         // Invoke clang to compile .ll to binary with full optimization
@@ -147,14 +123,19 @@ fn main() {
             .arg("-march=native")
             .arg("-ffast-math")
             .arg(&ll_filename)
+            .arg("src/runtime.c")
             .arg("-o")
             .arg(&bin_filename)
-            .status()
-            .expect("Failed to execute clang. Is clang installed and in your PATH?");
+            .status();
 
-        if !clang_status.success() {
-            eprintln!("Clang backend compilation failed.");
-            process::exit(1);
+        if let Ok(status) = clang_status {
+            if !status.success() {
+                let _ = fs::remove_file(&ll_filename);
+                return Err(CompileError::BackendError("Clang backend compilation failed.".to_string()));
+            }
+        } else {
+            let _ = fs::remove_file(&ll_filename);
+            return Err(CompileError::BackendError("Failed to execute clang. Is clang installed and in your PATH?".to_string()));
         }
 
         // Smart cleanup: delete the intermediate .ll file
@@ -166,15 +147,42 @@ fn main() {
         match run_status {
             Ok(status) => {
                 if !status.success() {
-                    eprintln!("Program exited with an error status: {}", status);
-                    process::exit(1);
+                    return Err(CompileError::BackendError(format!("Program exited with an error status: {}", status)));
                 }
             }
             Err(e) => {
-                eprintln!("Failed to execute the generated binary: {}", e);
+                return Err(CompileError::BackendError(format!("Failed to execute the generated binary: {}", e)));
             }
         }
-    } else {
-        println!("Successfully compiled to {}", ll_filename);
+    }
+    
+    Ok(())
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        print_usage();
+        process::exit(1);
+    }
+
+    let command = &args[1];
+    let filename = &args[2];
+
+    if command != "compile" && command != "run" {
+        eprintln!("Unknown command: {}", command);
+        process::exit(1);
+    }
+
+    match run_compiler(command, filename) {
+        Ok(_) => {
+            if command == "compile" {
+                println!("Successfully compiled.");
+            }
+        }
+        Err(e) => {
+            eprintln!("Compilation failed:\n{}", e);
+            std::process::exit(1);
+        }
     }
 }

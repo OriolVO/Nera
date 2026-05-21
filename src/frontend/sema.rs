@@ -14,35 +14,39 @@ pub enum TypeInfo {
     Unknown,
 }
 
-impl TypeInfo {
-    pub fn from_ast(ty: &Type) -> Self {
-        let base = match ty.name.as_str() {
-            "Int" => TypeInfo::Int,
-            "Float" => TypeInfo::Float,
-            "Boolean" => TypeInfo::Boolean,
-            "String" => TypeInfo::String,
-            "Void" => TypeInfo::Void,
-            "Unknown" => TypeInfo::Unknown,
-            custom => TypeInfo::Custom(custom.to_string()),
-        };
-        if ty.is_array {
-            TypeInfo::Array(Box::new(base), ty.array_size)
-        } else {
-            base
+macro_rules! primitive_type_mapper {
+    ($($name:ident => $str_val:expr),* $(,)?) => {
+        pub fn from_ast(ty: &Type) -> Self {
+            let base = match ty.name.as_str() {
+                $( $str_val => TypeInfo::$name, )*
+                "Unknown" => TypeInfo::Unknown,
+                custom => TypeInfo::Custom(custom.to_string()),
+            };
+            if ty.is_array {
+                TypeInfo::Array(Box::new(base), ty.array_size)
+            } else {
+                base
+            }
         }
-    }
 
-    pub fn to_string(&self) -> String {
-        match self {
-            TypeInfo::Int => "Int".to_string(),
-            TypeInfo::Float => "Float".to_string(),
-            TypeInfo::Boolean => "Boolean".to_string(),
-            TypeInfo::String => "String".to_string(),
-            TypeInfo::Void => "Void".to_string(),
-            TypeInfo::Array(inner, _) => format!("{}[]", inner.to_string()),
-            TypeInfo::Custom(name) => name.clone(),
-            TypeInfo::Unknown => "Unknown".to_string(),
+        pub fn to_string(&self) -> String {
+            match self {
+                $( TypeInfo::$name => $str_val.to_string(), )*
+                TypeInfo::Array(inner, _) => format!("{}[]", inner.to_string()),
+                TypeInfo::Custom(name) => name.clone(),
+                TypeInfo::Unknown => "Unknown".to_string(),
+            }
         }
+    };
+}
+
+impl TypeInfo {
+    primitive_type_mapper! {
+        Int => "Int",
+        Float => "Float",
+        Boolean => "Boolean",
+        String => "String",
+        Void => "Void",
     }
 
     pub fn is_array(&self) -> bool {
@@ -79,12 +83,19 @@ pub struct DataSymbol {
     pub fields: HashMap<String, TypeInfo>, // field name, type
 }
 
+/// Represents a choice structure within the symbol table.
+#[derive(Debug, Clone)]
+pub struct ChoiceSymbol {
+    pub variants: HashMap<String, Vec<TypeInfo>>,
+}
+
 /// A generic symbol that can be stored in the environment.
 #[derive(Debug, Clone)]
 pub enum Symbol {
     Variable(VariableSymbol),
     Function(FunctionSymbol),
     Data(DataSymbol),
+    Choice(ChoiceSymbol),
 }
 
 /// A scoped symbol table for tracking declarations.
@@ -195,12 +206,23 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.env.define(fn_decl.name.clone(), Symbol::Function(FunctionSymbol { params, return_ty }));
             }
             Declaration::Var(_) => {}
+            Declaration::Choice(choice_decl) => {
+                let mut variants = HashMap::new();
+                for variant in &choice_decl.variants {
+                    let types: Vec<TypeInfo> = variant.associated_types.iter()
+                        .map(|t| TypeInfo::from_ast(&t.node))
+                        .collect();
+                    variants.insert(variant.name.clone(), types);
+                }
+                self.env.define(choice_decl.name.clone(), Symbol::Choice(ChoiceSymbol { variants }));
+            }
         }
     }
 
     fn analyze_declaration(&mut self, decl: &mut Spanned<Declaration>) {
         match &mut decl.node {
             Declaration::Data(_) => {}
+            Declaration::Choice(_) => {}
             Declaration::Fn(fn_decl) => {
                 self.env.enter_scope();
                 for param in &fn_decl.params {
@@ -378,16 +400,95 @@ impl<'a> SemanticAnalyzer<'a> {
         }
 
         match &mut expr.node {
+            Expression::When(when_expr) => {
+                let target_ty = self.analyze_expression(&mut when_expr.target);
+                let choice_name = match &target_ty {
+                    TypeInfo::Custom(name) => name.clone(),
+                    _ => {
+                        self.report_error(&when_expr.target.span, &format!("Expected a choice type, found {}", target_ty.to_string()));
+                        return TypeInfo::Unknown;
+                    }
+                };
+
+                let choice_sym = match self.env.resolve(&choice_name) {
+                    Some(Symbol::Choice(sym)) => sym.clone(),
+                    _ => {
+                        self.report_error(&when_expr.target.span, &format!("'{}' is not a valid choice type", choice_name));
+                        return TypeInfo::Unknown;
+                    }
+                };
+
+                let mut return_type: Option<TypeInfo> = None;
+                let mut seen_variants = std::collections::HashSet::new();
+
+                for case in &mut when_expr.cases {
+                    seen_variants.insert(case.variant_name.clone());
+
+                    if let Some(associated_types) = choice_sym.variants.get(&case.variant_name) {
+                        if case.bindings.len() != associated_types.len() {
+                            self.report_error(&when_expr.target.span, &format!("Variant '{}' expects {} bindings, but got {}", case.variant_name, associated_types.len(), case.bindings.len()));
+                        }
+
+                        self.env.enter_scope();
+                        for (i, binding) in case.bindings.iter().enumerate() {
+                            let ty = associated_types.get(i).cloned().unwrap_or(TypeInfo::Unknown);
+                            self.env.define(binding.clone(), Symbol::Variable(VariableSymbol {
+                                is_mut: false,
+                                ty: ty.clone(),
+                                size: None,
+                            }));
+                            self.inferred_types.insert(binding.clone(), ty);
+                        }
+                        
+                        self.analyze_block(&mut case.body);
+                        let body_ty = if let Some(last_stmt) = case.body.node.statements.last_mut() {
+                            if let Statement::Expr(expr) = &mut last_stmt.node {
+                                self.analyze_expression(expr)
+                            } else {
+                                TypeInfo::Void
+                            }
+                        } else {
+                            TypeInfo::Void
+                        };
+                        self.env.exit_scope();
+
+                        if let Some(expected) = &return_type {
+                            if *expected != body_ty && body_ty != TypeInfo::Unknown && *expected != TypeInfo::Unknown {
+                                self.report_error(&when_expr.target.span, &format!("Incompatible return types in when cases: expected {}, found {}", expected.to_string(), body_ty.to_string()));
+                            }
+                        } else {
+                            return_type = Some(body_ty);
+                        }
+                    } else {
+                        self.report_error(&when_expr.target.span, &format!("Variant '{}' is not defined for choice '{}'", case.variant_name, choice_name));
+                    }
+                }
+
+                // Exhaustiveness checking
+                for variant_name in choice_sym.variants.keys() {
+                    if !seen_variants.contains(variant_name) {
+                        self.report_error(&when_expr.target.span, &format!("Non-exhaustive pattern: variant '{}' is not handled", variant_name));
+                    }
+                }
+
+                return_type.unwrap_or(TypeInfo::Unknown)
+            }
             Expression::Call(func_call) => {
                 let mut arg_types = Vec::new();
                 for arg in &mut func_call.arguments {
                     arg_types.push(self.analyze_expression(arg));
                 }
                 
-                if let Expression::Primary(PrimaryExpr::Identifier(name)) = &func_call.callee.node {
+                if let Expression::Primary(PrimaryExpr::Identifier(name)) = &mut func_call.callee.node {
                     if name == "print" {
                         if arg_types.len() != 1 {
                             self.report_error(&func_call.callee.span, "Function 'print' expects exactly 1 argument");
+                        } else {
+                            if arg_types[0] == TypeInfo::Float {
+                                *name = "print_float".to_string();
+                            } else {
+                                *name = "print_int".to_string();
+                            }
                         }
                         return TypeInfo::Void;
                     }
