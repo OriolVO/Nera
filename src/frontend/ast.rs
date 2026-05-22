@@ -179,6 +179,7 @@ pub enum Expression {
     VectorSlice(Box<VectorSliceExpr>),
     Index(Box<IndexExpr>),
     VariantConstruct(Box<VariantConstructExpr>),
+    StructFieldAccess(Box<StructFieldAccessExpr>),
     Primary(PrimaryExpr),
 }
 
@@ -249,6 +250,14 @@ pub struct FunctionCall {
 pub struct PropertyAccess {
     pub object: Spanned<Expression>,
     pub property: String,
+}
+
+/// Explicit pointer access to a heap-allocated struct's field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructFieldAccessExpr {
+    pub object: Spanned<Expression>,
+    pub field_index: usize,
+    pub field_type: String,
 }
 
 /// An explicit vector slice, e.g. `swarm.x[]` or `swarm.x[start..end]`.

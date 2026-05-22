@@ -1,11 +1,22 @@
 use std.io
 
+data Big {
+    a: Int
+    b: Int
+    c: Int
+}
+
 fn main() {
-    mut p1 = alloc Int()
-    mut p2 = alloc Float()
+    mut obj = alloc Big()
+    obj^.a = 100
+    obj^.b = 200
+    obj^.c = 300
     
-    free p1
-    free p2
+    print(obj^.a)
+    print(obj^.b)
+    print(obj^.c)
+    
+    free obj
     
     print("Successfully freed!")
 }

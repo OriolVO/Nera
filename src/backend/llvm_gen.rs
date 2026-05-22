@@ -466,6 +466,38 @@ impl LLVMGenerator {
                 // Align 32 for SIMD capability
                 self.builder.build_store(val_val, casted_ptr, Some(8));
             }
+            IRInstruction::LoadStructField(dest, ptr, index, type_name) => {
+                let ptr_val = self.operand_to_value(ptr)?;
+                // Cast to i64* to step by 8 bytes
+                let casted_i64_ptr = self.builder.build_bitcast(ptr_val, LLVMType::Pointer(Box::new(LLVMType::I64)));
+                let element_ptr = self.builder.build_gep(LLVMType::I64, casted_i64_ptr, vec![LLVMValue::ConstI64(*index as i64)])?;
+                
+                // Need to parse type_name to LLVMType
+                // Temporary simplified parser, assuming it matches Nera's types
+                let field_llvm_ty = if type_name == "Int" { LLVMType::I64 }
+                else if type_name == "Float" { LLVMType::Double }
+                else if type_name == "Boolean" { LLVMType::I1 }
+                else if type_name.starts_with('^') { LLVMType::Pointer(Box::new(LLVMType::I64)) } // simplify
+                else { LLVMType::I64 };
+
+                let target_ptr = self.builder.build_bitcast(element_ptr, LLVMType::Pointer(Box::new(field_llvm_ty)));
+                let loaded = self.builder.build_load(target_ptr, Some(8))?;
+
+                if let IROperand::TempReg(t) = dest {
+                    self.temp_map.insert(*t, loaded);
+                }
+            }
+            IRInstruction::StoreStructField(ptr, index, val) => {
+                let ptr_val = self.operand_to_value(ptr)?;
+                let val_val = self.operand_to_value(val)?;
+
+                // Cast to i64* to step by 8 bytes
+                let casted_i64_ptr = self.builder.build_bitcast(ptr_val, LLVMType::Pointer(Box::new(LLVMType::I64)));
+                let element_ptr = self.builder.build_gep(LLVMType::I64, casted_i64_ptr, vec![LLVMValue::ConstI64(*index as i64)])?;
+                
+                let target_ptr = self.builder.build_bitcast(element_ptr, LLVMType::Pointer(Box::new(val_val.get_type())));
+                self.builder.build_store(val_val, target_ptr, Some(8));
+            }
             IRInstruction::LoadArrayElement(dest, array_name, prop_name, index, capacity) => {
                 let field_key = format!("{}_{}", array_name, prop_name);
                 let array_ptr = if let Some(p) = self.function_params.get(&field_key) {

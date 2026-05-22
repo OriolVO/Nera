@@ -60,6 +60,8 @@ pub enum IRInstruction {
     Free(IROperand), // target_ptr
     LoadPointer(IROperand, IROperand), // dest, source_ptr
     StorePointer(IROperand, IROperand), // dest_ptr, source_val
+    LoadStructField(IROperand, IROperand, usize, String), // dest, struct_ptr, field_index, field_type_name
+    StoreStructField(IROperand, usize, IROperand), // struct_ptr, field_index, value
     LoadArrayElement(IROperand, String, String, IROperand, i64), // dest, array, prop, index, capacity
     StoreArrayElement(String, String, IROperand, IROperand, i64), // array, prop, index, value, capacity
 }
@@ -370,7 +372,16 @@ impl IRGenerator {
                     }
                 };
                 
-                if let Expression::Property(prop_access) = &assignment.target.node {
+                if let Expression::StructFieldAccess(access) = &assignment.target.node {
+                    let ptr_op = self.generate_expression(&access.object);
+                    let val_op = self.generate_expression(&assignment.value);
+                    
+                    self.emit(IRInstruction::StoreStructField(
+                        ptr_op,
+                        access.field_index,
+                        val_op,
+                    ));
+                } else if let Expression::Property(prop_access) = &assignment.target.node {
                     let obj_val = self.generate_expression(&prop_access.object);
                     self.emit(IRInstruction::StoreProperty(
                         obj_val,
@@ -503,6 +514,17 @@ impl IRGenerator {
                     dest.clone(),
                     obj,
                     prop_access.property.clone(),
+                ));
+                dest
+            }
+            Expression::StructFieldAccess(access) => {
+                let ptr_op = self.generate_expression(&access.object);
+                let dest = self.new_temp();
+                self.emit(IRInstruction::LoadStructField(
+                    dest.clone(),
+                    ptr_op,
+                    access.field_index,
+                    access.field_type.clone(),
                 ));
                 dest
             }

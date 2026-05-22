@@ -194,6 +194,14 @@ impl IROptimizer {
             IRInstruction::Free(ptr) => {
                 add_use(ptr);
             }
+            IRInstruction::LoadStructField(dest, ptr, _, _) => {
+                add_use(ptr);
+                add_def(dest);
+            }
+            IRInstruction::StoreStructField(ptr, _, val) => {
+                add_use(ptr);
+                add_use(val);
+            }
         }
         (uses, defs)
     }
@@ -327,7 +335,7 @@ impl IROptimizer {
                 let (uses, defs) = self.instr_use_def(instr);
                 let has_side_effects = matches!(
                     instr,
-                    IRInstruction::Call(_, _, _) | IRInstruction::StoreProperty(_, _, _) | IRInstruction::FlatVectorApply(..) | IRInstruction::StoreArrayElement(..) | IRInstruction::Free(_)
+                    IRInstruction::Call(_, _, _) | IRInstruction::StoreProperty(_, _, _) | IRInstruction::FlatVectorApply(..) | IRInstruction::StoreArrayElement(..) | IRInstruction::Free(_) | IRInstruction::StoreStructField(_, _, _)
                 );
 
                 let mut is_dead = true;
