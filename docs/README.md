@@ -144,7 +144,7 @@ fn process_simulation() {
     mut swarm: Particle[10000] = initialize_swarm()
 
     // 1. Flat Application: Automatically vectorized by the compiler
-    swarm.x += 1.5
+    swarm.x[] += 1.5
 
     // 2. Pipe Operator: Clean sequential data streaming
     let results = swarm >> filter_active >> compute_metrics
@@ -239,8 +239,10 @@ MultiplicativeExpr ::= PostfixExpr (("*" | "/") PostfixExpr)*
      Choice.Variant(args)  – ADT constructor with payload (resolved in sema)
      expr(args)            – direct function call
      expr^                 – pointer dereference
+     expr[]                – explicit vector slice / indexing
 */
 PostfixExpr     ::= PrimaryExpr ( "." Identifier ( "(" ArgumentList? ")" )?
+                                 | "[" (Expression ".." Expression | Expression)? "]"
                                  | "(" ArgumentList? ")"
                                  | "^"
                                  )*

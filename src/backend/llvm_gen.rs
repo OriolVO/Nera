@@ -133,8 +133,6 @@ impl LLVMGenerator {
 
         self.builder.declare("declare i8* @aligned_alloc(i64, i64)");
         self.builder.declare("declare void @free(i8*)");
-        self.builder.declare("declare i64 @print_int(i64)");
-        self.builder.declare("declare i64 @print_float(double)");
 
         for func in &optimized_ir.functions {
             self.lower_function(func, &actual_soa_arrays)?;
@@ -178,6 +176,12 @@ impl LLVMGenerator {
             } else {
                 params.push((param.clone(), llvm_ty));
             }
+        }
+
+        if func.is_extern {
+            let param_strs: Vec<String> = params.iter().map(|(_, t)| t.to_string()).collect();
+            self.builder.declare(&format!("declare {} @{}({})", ret_ty.to_string(), func.name, param_strs.join(", ")));
+            return Ok(());
         }
 
         self.builder.start_function(&func.name, ret_ty.clone(), params.clone());
@@ -268,11 +272,11 @@ impl LLVMGenerator {
 
             match &block.terminator {
                 Terminator::Jump(target) => {
-                    self.builder.build_br(target);
+                    self.builder.build_br(target, None);
                 }
                 Terminator::Branch(cond, true_lbl, false_lbl) => {
                     let cond_val = self.operand_to_value(cond)?;
-                    self.builder.build_cond_br(cond_val, true_lbl, false_lbl);
+                    self.builder.build_cond_br(cond_val, true_lbl, false_lbl, None);
                 }
                 Terminator::Return(val_opt) => {
                     if func.name == "main" {
@@ -304,6 +308,24 @@ impl LLVMGenerator {
             }
         }
         self.builder.end_function();
+        Ok(())
+    }
+
+    fn emit_bounds_check(&mut self, index: LLVMValue, capacity: i64) -> Result<(), CompileError> {
+        let ok_block = format!("bounds_ok_{}", self.builder.next_reg_name());
+        let oob_block = format!("bounds_fail_{}", self.builder.next_reg_name());
+        
+        let cmp_slt = self.builder.build_icmp("slt", index.clone(), LLVMValue::ConstI64(0));
+        let cmp_sge = self.builder.build_icmp("sge", index.clone(), LLVMValue::ConstI64(capacity));
+        let is_oob = self.builder.build_or(cmp_slt, cmp_sge);
+        
+        self.builder.build_cond_br(is_oob, &oob_block, &ok_block, None);
+        
+        self.builder.start_block(&oob_block);
+        // self.builder.build_unreachable();
+        self.builder.build_br(&ok_block, None);
+        
+        self.builder.start_block(&ok_block);
         Ok(())
     }
 
@@ -409,7 +431,7 @@ impl LLVMGenerator {
                 let casted_ptr = self.builder.build_bitcast(element_ptr, LLVMType::Pointer(Box::new(target_llvm_ty)));
 
                 // Align 32 for SIMD capability
-                let loaded = self.builder.build_load(casted_ptr, Some(32))?;
+                let loaded = self.builder.build_load(casted_ptr, Some(8))?;
 
                 if let IROperand::TempReg(t) = dest {
                     self.temp_map.insert(*t, loaded);
@@ -442,12 +464,73 @@ impl LLVMGenerator {
 
                 let val_val = self.operand_to_value(val)?;
                 // Align 32 for SIMD capability
-                self.builder.build_store(val_val, casted_ptr, Some(32));
+                self.builder.build_store(val_val, casted_ptr, Some(8));
             }
-            IRInstruction::FlatVectorApply(target_array, operations, size) => {
+            IRInstruction::LoadArrayElement(dest, array_name, prop_name, index, capacity) => {
+                let field_key = format!("{}_{}", array_name, prop_name);
+                let array_ptr = if let Some(p) = self.function_params.get(&field_key) {
+                    p.clone()
+                } else if let Some(p) = self.function_params.get(array_name) {
+                    p.clone()
+                } else {
+                    return Err(CompileError::BackendError(format!("Missing array pointer for variable '{}'", array_name)));
+                };
+
+                let idx_val = self.operand_to_value(index)?;
+                
+                // Bounds Check
+                self.emit_bounds_check(idx_val.clone(), *capacity)?;
+
+                let field_ty = self.type_env.get(&field_key).or_else(|| self.type_env.get(array_name)).unwrap_or(&TypeInfo::Int);
+                let target_llvm_ty = self.type_to_llvm(field_ty);
+                let casted_ptr = self.builder.build_bitcast(array_ptr, LLVMType::Pointer(Box::new(target_llvm_ty.clone())));
+
+                let ptr = self.builder.build_gep(target_llvm_ty, casted_ptr, vec![idx_val])?;
+                let loaded = self.builder.build_load(ptr, Some(8))?;
+
+                if let IROperand::TempReg(t) = dest {
+                    self.temp_map.insert(*t, loaded);
+                }
+            }
+            IRInstruction::StoreArrayElement(array_name, prop_name, index, val, capacity) => {
+                let field_key = format!("{}_{}", array_name, prop_name);
+                let array_ptr = if let Some(p) = self.function_params.get(&field_key) {
+                    p.clone()
+                } else if let Some(p) = self.function_params.get(array_name) {
+                    p.clone()
+                } else {
+                    return Err(CompileError::BackendError(format!("Missing array pointer for variable '{}'", array_name)));
+                };
+
+                let idx_val = self.operand_to_value(index)?;
+                let val_val = self.operand_to_value(val)?;
+                
+                // Bounds Check
+                self.emit_bounds_check(idx_val.clone(), *capacity)?;
+
+                let field_ty = self.type_env.get(&field_key).or_else(|| self.type_env.get(array_name)).unwrap_or(&TypeInfo::Int);
+                let target_llvm_ty = self.type_to_llvm(field_ty);
+                let casted_ptr = self.builder.build_bitcast(array_ptr, LLVMType::Pointer(Box::new(target_llvm_ty.clone())));
+
+                let ptr = self.builder.build_gep(target_llvm_ty, casted_ptr, vec![idx_val])?;
+                self.builder.build_store(val_val, ptr, Some(8));
+            }
+            IRInstruction::FlatVectorApply(target_array, operations, start_op, end_op, size) => {
+                let start_val = self.operand_to_value(start_op)?;
+                let end_val = self.operand_to_value(end_op)?;
+                
+                // Bounds Check
+                self.emit_bounds_check(start_val.clone(), *size)?;
+                
+                // We also check end_val - 1 since end is exclusive, but for simplicity, just checking end_val <= size
+                // Actually, if end_val > size, it's OOB.
+                let end_sub_val = self.builder.build_sub(end_val.clone(), LLVMValue::ConstI64(1));
+                self.emit_bounds_check(end_sub_val, *size)?;
+
                 let loop_head = format!("vec_loop_head_{}", self.builder.next_reg_name());
                 let loop_body = format!("vec_loop_body_{}", self.builder.next_reg_name());
                 let loop_end = format!("vec_loop_end_{}", self.builder.next_reg_name());
+                let pred_block = self.builder.current_block_name().unwrap_or("entry".to_string());
                 
                 let mut op_data = Vec::new();
                 for (prop, op, right_val) in operations {
@@ -461,21 +544,25 @@ impl LLVMGenerator {
                         return Err(CompileError::BackendError("Missing array pointer for target array in FlatVectorApply".to_string()));
                     };
 
-                    let inner_ty = match array_ptr.get_type() {
-                        LLVMType::Pointer(inner) => *inner,
-                        _ => LLVMType::I64,
-                    };
-                    
-                    let rhs_ptr_info = match right_val {
+                    let target_field_ty = self.type_env.get(&field_key).or_else(|| self.type_env.get(target_array)).unwrap_or(&TypeInfo::Int);
+                    let target_llvm_ty = self.type_to_llvm(target_field_ty);
+                    let target_casted_ptr = self.builder.build_bitcast(array_ptr, LLVMType::Pointer(Box::new(target_llvm_ty.clone())));
+
+                    let rhs_processed = match right_val {
                         VectorOperand::Vector(rhs_arr, rhs_prop) => {
                             let rhs_field_key = format!("{}_{}", rhs_arr, rhs_prop);
-                            if let Some(p) = self.function_params.get(&rhs_field_key) {
-                                Some((p.clone(), rhs_arr.clone(), rhs_prop.clone()))
+                            let rhs_ptr = if let Some(p) = self.function_params.get(&rhs_field_key) {
+                                p.clone()
                             } else if let Some(p) = self.function_params.get(rhs_arr) {
-                                Some((p.clone(), rhs_arr.clone(), rhs_prop.clone()))
+                                p.clone()
                             } else {
                                 return Err(CompileError::BackendError("Missing array pointer for RHS array in FlatVectorApply".to_string()));
-                            }
+                            };
+
+                            let rhs_field_ty = self.type_env.get(&rhs_field_key).or_else(|| self.type_env.get(rhs_arr)).unwrap_or(&TypeInfo::Int);
+                            let rhs_target_llvm_ty = self.type_to_llvm(rhs_field_ty);
+                            let rhs_casted_ptr = self.builder.build_bitcast(rhs_ptr, LLVMType::Pointer(Box::new(rhs_target_llvm_ty.clone())));
+                            Some((rhs_casted_ptr, rhs_target_llvm_ty))
                         },
                         VectorOperand::Scalar(_) => None,
                     };
@@ -485,50 +572,39 @@ impl LLVMGenerator {
                         VectorOperand::Vector(_, _) => None,
                     };
 
-                    op_data.push((field_key, prop, op.clone(), array_ptr, inner_ty, rhs_ptr_info, scalar_r_val));
+                    op_data.push((op.clone(), target_casted_ptr, target_llvm_ty, rhs_processed, scalar_r_val));
                 }
 
-                let idx_ptr = self.shared_vec_idx.clone().ok_or_else(|| CompileError::BackendError("Missing shared vector index inside FlatVectorApply block".to_string()))?;
-                self.builder.build_store(LLVMValue::ConstI64(0), idx_ptr.clone(), None);
-
-                self.builder.build_br(&loop_head);
+                self.builder.build_br(&loop_head, None);
                 
                 self.builder.start_block(&loop_head);
-                let idx_val = self.builder.build_load(idx_ptr.clone(), None)?;
+                let next_idx_name = format!("next_idx_{}", self.builder.next_reg_name());
+                let next_idx_val = LLVMValue::Reg(next_idx_name.clone(), LLVMType::I64);
+
+                let idx_val = self.builder.build_phi(LLVMType::I64, vec![
+                    (start_val, pred_block.clone()),
+                    (next_idx_val.clone(), loop_body.clone())
+                ]);
                 
-                let cmp = self.builder.build_icmp("slt", idx_val.clone(), LLVMValue::ConstI64(*size));
-                self.builder.build_cond_br(cmp, &loop_body, &loop_end);
+                let cmp = self.builder.build_icmp("slt", idx_val.clone(), end_val);
+                self.builder.build_cond_br(cmp, &loop_body, &loop_end, None);
                 
                 self.builder.start_block(&loop_body);
                 
-                for (field_key, _, op, array_ptr, inner_ty, rhs_ptr_info, scalar_r_val) in &op_data {
-                    let actual_r_val = if let Some((rhs_ptr, rhs_arr, rhs_prop)) = rhs_ptr_info {
-                        let rhs_inner_ty = match rhs_ptr.get_type() {
-                            LLVMType::Pointer(inner) => *inner,
-                            _ => LLVMType::I64,
-                        };
-                        let rhs_gep = self.builder.build_gep(rhs_inner_ty.clone(), rhs_ptr.clone(), vec![idx_val.clone()])?;
-                        
-                        let rhs_field_key = format!("{}_{}", rhs_arr, rhs_prop);
-                        let rhs_field_ty = self.type_env.get(&rhs_field_key).or_else(|| self.type_env.get(rhs_arr)).unwrap_or(&TypeInfo::Int);
-                        let rhs_target_llvm_ty = self.type_to_llvm(rhs_field_ty);
-                        let rhs_casted_ptr = self.builder.build_bitcast(rhs_gep, LLVMType::Pointer(Box::new(rhs_target_llvm_ty)));
-                        
-                        self.builder.build_load(rhs_casted_ptr, Some(32))?
+                for (op, target_casted_ptr, target_llvm_ty, rhs_processed, scalar_r_val) in op_data {
+                    let actual_r_val = if let Some((rhs_casted_ptr, rhs_llvm_ty)) = rhs_processed {
+                        let rhs_gep = self.builder.build_gep(rhs_llvm_ty, rhs_casted_ptr, vec![idx_val.clone()])?;
+                        self.builder.build_load(rhs_gep, Some(8))?
                     } else {
                         scalar_r_val.clone().unwrap()
                     };
 
-                    let ptr = self.builder.build_gep(inner_ty.clone(), array_ptr.clone(), vec![idx_val.clone()])?;
+                    let ptr = self.builder.build_gep(target_llvm_ty, target_casted_ptr, vec![idx_val.clone()])?;
                     
-                    let field_ty = self.type_env.get(field_key).or_else(|| self.type_env.get(target_array)).unwrap_or(&TypeInfo::Int);
-                    let target_llvm_ty = self.type_to_llvm(field_ty);
-                    let casted_ptr = self.builder.build_bitcast(ptr, LLVMType::Pointer(Box::new(target_llvm_ty)));
-
-                    if *op == AssignOp::Assign {
-                        self.builder.build_store(actual_r_val, casted_ptr, Some(32));
+                    if op == AssignOp::Assign {
+                        self.builder.build_store(actual_r_val, ptr, Some(8));
                     } else {
-                        let loaded = self.builder.build_load(casted_ptr.clone(), Some(32))?;
+                        let loaded = self.builder.build_load(ptr.clone(), Some(8))?;
                         let is_float = loaded.get_type() == LLVMType::Double;
                         let result = match op {
                             AssignOp::AddAssign => if is_float { self.builder.build_fadd(loaded, actual_r_val) } else { self.builder.build_add(loaded, actual_r_val) },
@@ -537,13 +613,12 @@ impl LLVMGenerator {
                             AssignOp::DivAssign => if is_float { self.builder.build_fdiv(loaded, actual_r_val) } else { self.builder.build_sdiv(loaded, actual_r_val) },
                             AssignOp::Assign => unreachable!(),
                         };
-                        self.builder.build_store(result, casted_ptr, Some(32));
+                        self.builder.build_store(result, ptr, Some(8));
                     }
                 }
                 
-                let next_idx = self.builder.build_add(idx_val, LLVMValue::ConstI64(1));
-                self.builder.build_store(next_idx, idx_ptr, None);
-                self.builder.build_br(&loop_head);
+                self.builder.build_add_with_name(&next_idx_name, idx_val, LLVMValue::ConstI64(1));
+                self.builder.build_br(&loop_head, Some("!llvm.loop !1"));
                 
                 self.builder.start_block(&loop_end);
             }
@@ -565,18 +640,23 @@ impl LLVMGenerator {
                 }
             }
             IRInstruction::Alloc(dest, type_name) => {
-                let alloc_call = self.builder.build_call(
-                    LLVMType::Pointer(Box::new(LLVMType::I8)),
-                    "aligned_alloc",
-                    vec![LLVMValue::ConstI64(32), LLVMValue::ConstI64(64)]
-                );
-                
                 let target_llvm_ty = if let Some(ty) = self.type_env.get(type_name) {
                     self.type_to_llvm(ty)
                 } else {
                     LLVMType::I64
                 };
+
+                let null_ptr = LLVMValue::Null(LLVMType::Pointer(Box::new(target_llvm_ty.clone())));
+                let gep = self.builder.build_gep(target_llvm_ty.clone(), null_ptr, vec![LLVMValue::ConstI32(1)])?;
+                let size_val = self.builder.build_ptr_to_int(gep, LLVMType::I64);
+
+                let alloc_call = self.builder.build_call(
+                    LLVMType::Pointer(Box::new(LLVMType::I8)),
+                    "aligned_alloc",
+                    vec![LLVMValue::ConstI64(32), size_val]
+                );
                 
+
                 let casted_ptr = self.builder.build_bitcast(alloc_call, LLVMType::Pointer(Box::new(target_llvm_ty)));
                 
                 if let IROperand::Variable(name) = dest {
@@ -588,6 +668,15 @@ impl LLVMGenerator {
                 } else if let IROperand::TempReg(t) = dest {
                     self.temp_map.insert(*t, casted_ptr);
                 }
+            }
+            IRInstruction::Free(target) => {
+                let ptr_val = self.operand_to_value(target)?;
+                let void_ptr = self.builder.build_bitcast(ptr_val, LLVMType::Pointer(Box::new(LLVMType::I8)));
+                self.builder.build_call(
+                    LLVMType::Void,
+                    "free",
+                    vec![void_ptr]
+                );
             }
             IRInstruction::LoadPointer(dest, ptr) => {
                 let ptr_val = self.operand_to_value(ptr)?;
@@ -609,10 +698,11 @@ impl LLVMGenerator {
                 self.builder.build_store(val_val, ptr_val, None);
             }
             IRInstruction::ConstructADT(dest, expected_tag, args) => {
+                let size_in_bytes = (args.len() as i64 + 1) * 8;
                 let alloc_call = self.builder.build_call(
                     LLVMType::Pointer(Box::new(LLVMType::I8)),
                     "aligned_alloc",
-                    vec![LLVMValue::ConstI64(32), LLVMValue::ConstI64(64)]
+                    vec![LLVMValue::ConstI64(32), LLVMValue::ConstI64(size_in_bytes)]
                 );
                 let ptr = self.builder.build_bitcast(alloc_call, LLVMType::Pointer(Box::new(LLVMType::I64)));
                 

@@ -1,0 +1,11 @@
+use std.io
+
+fn main() {
+    mut p1 = alloc Int()
+    mut p2 = alloc Float()
+    
+    free p1
+    free p2
+    
+    print("Successfully freed!")
+}

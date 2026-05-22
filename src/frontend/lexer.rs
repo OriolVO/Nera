@@ -13,6 +13,7 @@ pub enum TokenKind {
     While,
     Return,
     Use,
+    Extern,
     True,
     False,
     Choice,
@@ -46,8 +47,9 @@ pub enum TokenKind {
     Arrow,        // ->
     Caret,        // ^
     Alloc,        // alloc
+    Free,         // free
     Question,     // ?
-    NoneLit,      // None
+    NoneLiteral,  // None
 
     // Delimiters
     LBrace,       // {
@@ -59,6 +61,7 @@ pub enum TokenKind {
     Colon,        // :
     Comma,        // ,
     Dot,          // .
+    DotDot,       // ..
 
     Error(String),
     Eof,
@@ -153,12 +156,14 @@ impl<'a> Lexer<'a> {
             "while" => TokenKind::While,
             "return" => TokenKind::Return,
             "use" => TokenKind::Use,
+            "extern" => TokenKind::Extern,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "choice" => TokenKind::Choice,
             "when" => TokenKind::When,
             "alloc" => TokenKind::Alloc,
-            "None" => TokenKind::NoneLit,
+            "free" => TokenKind::Free,
+            "None" => TokenKind::NoneLiteral,
             "and" => TokenKind::And,
             "or" => TokenKind::Or,
             _ => TokenKind::Identifier(ident),
@@ -176,6 +181,13 @@ impl<'a> Lexer<'a> {
                 num_str.push(c);
                 self.advance();
             } else if c == '.' && !is_float {
+                // Check if it's '..', if so, break and don't consume the dot
+                let mut peek_iter = self.input.clone();
+                peek_iter.next(); // skip the first dot we just peeked
+                if peek_iter.peek() == Some(&'.') {
+                    break;
+                }
+                
                 is_float = true;
                 num_str.push(c);
                 self.advance();
@@ -252,7 +264,14 @@ impl<'a> Lexer<'a> {
             ')' => TokenKind::RParen,
             ':' => TokenKind::Colon,
             ',' => TokenKind::Comma,
-            '.' => TokenKind::Dot,
+            '.' => {
+                if let Some(&'.') = self.peek() {
+                    self.advance();
+                    TokenKind::DotDot
+                } else {
+                    TokenKind::Dot
+                }
+            },
             '^' => TokenKind::Caret,
             '?' => TokenKind::Question,
             '=' => {

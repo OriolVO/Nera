@@ -9,6 +9,19 @@ When the frontend parser encounters a method chain expression, such as `swarm.up
 To guarantee extreme cache-friendliness, Nera utilizes a deterministic bump-pointer Arena Allocator backing a pure SoA layout.
 When an array of structures is declared, e.g., `mut swarm: Particle[1000] = []`, the compiler calculates the stride dynamically. Instead of creating an array of packed Particle structs (AoS), the LLVM backend allocates a single monolithic, contiguous memory block via `malloc` during the `main` entry point. For each field in Particle (e.g., `x: Float`, `y: Float`), a separate, contiguous sub-block of `1000 * sizeof(Float)` bytes is logically partitioned. These column bindings (`%soa_swarm_x`, `%soa_swarm_y`) are mapped directly to native LLVM pointers.
 
+### 1.3 Explicit SIMD Vectorization & Slicing
+Nera requires explicit vectorization syntax using array slicing `[]`. Instead of implicitly vectorizing a scalar assignment (e.g., `swarm.x += swarm.vx`), the language enforces `swarm.x[] += swarm.vx[]`. This ensures performance predictability by explicitly informing the programmer that an SIMD vector operation over the Struct-of-Arrays (SoA) layout is occurring. Vector slice operations compile down to highly optimized `!llvm.loop.vectorize` loops.
+
+#### Advanced Slicing and Single-Element Indexing
+Developers can utilize partial boundaries to manipulate subsets of data:
+- **Bounded Slices:** `[start..end]` iterates exclusively over the defined range.
+- **Optional Boundaries:** `[..end]` infers the start index as `0`, and `[start..]` infers the end index as the capacity of the array.
+- **Single-Element Indexing:** Scalar indexing uses `[index]` to modify or read a specific element without invoking a vector loop.
+
+**Dynamic Expressions & Semantic Type Checking**: Indices and slice bounds can be dynamic variables (`let` or `mut` expressions). During semantic analysis, Nera statically verifies that all bound expressions evaluate exclusively to an `Int`. If a mismatched type (like a `Float` or `String`) is used as an index, the compiler emits a strict type error. Furthermore, assignments between slices are compile-time validated to ensure both sides operate on exactly matching array block sizes (e.g., `x[..20] = y[..20]`), otherwise a semantic error is thrown.
+
+#### Safety and Bounds Checking
+By default, all dynamic and literal indexing is equipped with fail-fast runtime Out-Of-Bounds (OOB) checks. Prior to lowering LLVM IR instructions for array retrieval or mutation, Nera emits `icmp` bounds checks (`0 <= index < capacity`). Any violation dynamically branches to an `unreachable` panic state, preventing memory violations without significantly impairing vectorized speed.
 ## 2. Module Import System (use) Grammar & Semantics
 ### 2.1 EBNF Grammar Expansion
 The canonical grammar is updated to permit an optional preamble of `ImportDirective` nodes at the root of a `Program`.
@@ -26,8 +39,14 @@ The use directive represents a static file-system mapping mechanism evaluated by
 - AST Stitching: The parser loads and tokenizes the target file, yielding a distinct Program AST. The driver then extracts all Declaration nodes from the module and prepends them into the primary Program's declaration vector.
 
 ## 3. Intrinsics Architecture & FFI (C Linkage via LLVM)
-### 3.1 Intrinsics Blueprint
-The semantic environment pre-registers specific identifiers as global primitives:
+### 3.1 Intrinsics Blueprint & Extern Functions
+Nera natively supports `extern fn` declarations to bind directly to standard `libc` functions without hardcoding them into the compiler's semantic analyzer. This enables developers to create standard libraries entirely in Nera.
+```nera
+extern fn fopen(path: String, mode: String) -> ^Void
+extern fn fread(ptr: ^Void, size: Int, n: Int, stream: ^Void) -> Int
+extern fn malloc(size: Int) -> ^Void
+```
+Historically, Nera also pre-registered specific identifiers as global primitives:
 - print_int(i: Int) -> Void
 - print_float(f: Float) -> Void
 - print_str(s: String) -> Void

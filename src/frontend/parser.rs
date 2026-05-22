@@ -146,9 +146,10 @@ impl<'a> Parser<'a> {
             TokenKind::Data => Declaration::Data(self.parse_data_decl()?),
             TokenKind::Choice => Declaration::Choice(self.parse_choice_decl()?),
             TokenKind::Fn => Declaration::Fn(self.parse_fn_decl()?),
+            TokenKind::Extern => Declaration::Extern(self.parse_extern_decl()?),
             TokenKind::Let | TokenKind::Mut => Declaration::Var(self.parse_var_decl()?),
             _ => {
-                self.report_error(&start_span, "Expected declaration (data, fn, let, mut)");
+                self.report_error(&start_span, "Expected declaration (data, choice, fn, extern, let, mut)");
                 return None;
             }
         };
@@ -290,6 +291,44 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_extern_decl(&mut self) -> Option<ExternDecl> {
+        self.consume(TokenKind::Extern, "Expected 'extern'")?;
+        self.consume(TokenKind::Fn, "Expected 'fn' after 'extern'")?;
+
+        let name = match &self.current_token.kind {
+            TokenKind::Identifier(name) => name.clone(),
+            _ => {
+                self.report_error(&self.current_token.span.clone(), "Expected identifier for external function name");
+                return None;
+            }
+        };
+        self.advance();
+
+        self.consume(TokenKind::LParen, "Expected '(' after function name")?;
+
+        let mut params = Vec::new();
+        if self.current_token.kind != TokenKind::RParen {
+            params.push(self.parse_param()?);
+            while self.current_token.kind == TokenKind::Comma {
+                self.advance(); // consume ','
+                params.push(self.parse_param()?);
+            }
+        }
+        self.consume(TokenKind::RParen, "Expected ')' after parameters")?;
+
+        let mut return_type = None;
+        if self.current_token.kind == TokenKind::Arrow {
+            self.advance(); // consume '->'
+            return_type = Some(self.parse_type()?);
+        }
+
+        Some(ExternDecl {
+            name,
+            params,
+            return_type,
+        })
+    }
+
     fn parse_param(&mut self) -> Option<Param> {
         let mut is_mut = false;
         if self.current_token.kind == TokenKind::Mut {
@@ -391,6 +430,7 @@ impl<'a> Parser<'a> {
             TokenKind::If => Statement::If(self.parse_if_stmt()?),
             TokenKind::While => Statement::While(self.parse_while_stmt()?),
             TokenKind::Return => Statement::Return(self.parse_return_stmt()?),
+            TokenKind::Free => Statement::Free(self.parse_free_stmt()?),
             _ => {
                 let expr = self.parse_expression()?;
                 
@@ -499,6 +539,11 @@ impl<'a> Parser<'a> {
         };
 
         Some(ReturnStmt { value })
+    }
+
+    fn parse_free_stmt(&mut self) -> Option<Spanned<Expression>> {
+        self.consume(TokenKind::Free, "Expected 'free'")?;
+        self.parse_expression()
     }
 
     // Expressions parsing follows precedence levels
@@ -710,6 +755,59 @@ impl<'a> Parser<'a> {
                     let span = expr.span.merge(&end_span);
                     expr = Spanned::new(Expression::Deref(Box::new(expr)), span);
                 }
+                TokenKind::LBracket => {
+                    self.advance(); // consume '['
+                    let mut start = None;
+                    let mut end = None;
+                    let mut is_slice = false;
+                    
+                    if self.current_token.kind != TokenKind::RBracket {
+                        if self.current_token.kind == TokenKind::DotDot {
+                            is_slice = true;
+                            self.advance(); // consume '..'
+                            if self.current_token.kind != TokenKind::RBracket {
+                                end = Some(self.parse_expression()?);
+                            }
+                        } else {
+                            let first_expr = self.parse_expression()?;
+                            if self.current_token.kind == TokenKind::DotDot {
+                                is_slice = true;
+                                start = Some(first_expr);
+                                self.advance(); // consume '..'
+                                if self.current_token.kind != TokenKind::RBracket {
+                                    end = Some(self.parse_expression()?);
+                                }
+                            } else if self.current_token.kind != TokenKind::RBracket {
+                                self.report_error(&self.current_token.span.clone(), "Expected '..' for slice or ']' for index");
+                                return None;
+                            } else {
+                                // It is an IndexExpr
+                                let end_span = self.current_token.span.clone();
+                                self.consume(TokenKind::RBracket, "Expected ']' after slice/index")?;
+                                let span = expr.span.merge(&end_span);
+                                expr = Spanned::new(Expression::Index(Box::new(IndexExpr {
+                                    target: expr,
+                                    index: first_expr,
+                                })), span);
+                                continue;
+                            }
+                        }
+                    } else {
+                        is_slice = true;
+                    }
+                    
+                    let end_span = self.current_token.span.clone();
+                    self.consume(TokenKind::RBracket, "Expected ']' after slice/index")?;
+                    let span = expr.span.merge(&end_span);
+                    
+                    if is_slice {
+                        expr = Spanned::new(Expression::VectorSlice(Box::new(VectorSliceExpr {
+                            target: expr,
+                            start,
+                            end,
+                        })), span);
+                    }
+                }
                 _ => break,
             }
         }
@@ -729,7 +827,7 @@ impl<'a> Parser<'a> {
         while self.current_token.kind != TokenKind::RBrace && self.current_token.kind != TokenKind::Eof {
             let variant_name = match &self.current_token.kind {
                 TokenKind::Identifier(name) => name.clone(),
-                TokenKind::NoneLit => "None".to_string(),
+                TokenKind::NoneLiteral => "None".to_string(),
                 _ => {
                     self.report_error(&self.current_token.span.clone(), "Expected variant name in when case");
                     return None;
@@ -818,7 +916,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 PrimaryExpr::Boolean(false)
             }
-            TokenKind::NoneLit => {
+            TokenKind::NoneLiteral => {
                 self.advance();
                 PrimaryExpr::NoneLiteral
             }

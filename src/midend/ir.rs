@@ -36,6 +36,7 @@ pub struct IRFunction {
     pub params: Vec<String>,
     pub return_type: String,
     pub blocks: Vec<BasicBlock>,
+    pub is_extern: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,13 +52,16 @@ pub enum IRInstruction {
     LoadProperty(IROperand, IROperand, String), // dest, object, property
     StoreProperty(IROperand, String, IROperand), // object, property, value
     Call(Option<IROperand>, IROperand, Vec<IROperand>), // dest_opt, callee, arguments
-    FlatVectorApply(String, Vec<(String, AssignOp, VectorOperand)>, i64), // target_array, operations, size
+    FlatVectorApply(String, Vec<(String, AssignOp, VectorOperand)>, IROperand, IROperand, i64), // target_array, operations, start, end, capacity
     ExtractTag(IROperand, IROperand), // dest, target_struct
     ExtractPayload(IROperand, IROperand, usize),
     ConstructADT(IROperand, i64, Vec<IROperand>), // dest, choice_name, variant_name, args // dest, target_struct, payload_index
     Alloc(IROperand, String), // dest, type_name
+    Free(IROperand), // target_ptr
     LoadPointer(IROperand, IROperand), // dest, source_ptr
     StorePointer(IROperand, IROperand), // dest_ptr, source_val
+    LoadArrayElement(IROperand, String, String, IROperand, i64), // dest, array, prop, index, capacity
+    StoreArrayElement(String, String, IROperand, IROperand, i64), // array, prop, index, value, capacity
 }
 
 pub struct IRGenerator {
@@ -190,6 +194,7 @@ impl IRGenerator {
                     params: flattened_params,
                     return_type,
                     blocks: Vec::new(),
+                    is_extern: false,
                 });
 
                 self.start_block("entry".to_string());
@@ -206,6 +211,26 @@ impl IRGenerator {
                 if let Some(func) = self.active_function.take() {
                     self.functions.push(func);
                 }
+            }
+            Declaration::Extern(extern_decl) => {
+                let return_type = if let Some(ty) = &extern_decl.return_type {
+                    ty.node.name.clone()
+                } else {
+                    "Void".to_string()
+                };
+
+                let mut flattened_params = Vec::new();
+                for param in &extern_decl.params {
+                    flattened_params.push(param.name.clone());
+                }
+
+                self.functions.push(IRFunction {
+                    name: extern_decl.name.clone(),
+                    params: flattened_params,
+                    return_type,
+                    blocks: Vec::new(),
+                    is_extern: true,
+                });
             }
             Declaration::Var(var_decl) => {
                 if let Some(ty) = &var_decl.ty {
@@ -261,29 +286,68 @@ impl IRGenerator {
                 ));
             }
             Statement::Assignment(assignment) => {
-                if let Expression::Property(prop_access) = &assignment.target.node {
-                    if let Expression::Primary(PrimaryExpr::Identifier(target_array)) = &prop_access.object.node {
-                        let right_val = if let Expression::Property(rhs_prop) = &assignment.value.node {
-                            if let Expression::Primary(PrimaryExpr::Identifier(rhs_arr)) = &rhs_prop.object.node {
-                                if self.array_sizes.contains_key(rhs_arr) || self.array_params.contains_key(rhs_arr) {
-                                    VectorOperand::Vector(rhs_arr.clone(), rhs_prop.property.clone())
+                if let Expression::VectorSlice(target_slice) = &assignment.target.node {
+                    if let Expression::Property(prop_access) = &target_slice.target.node {
+                        if let Expression::Primary(PrimaryExpr::Identifier(target_array)) = &prop_access.object.node {
+                            let right_val = if let Expression::VectorSlice(rhs_slice) = &assignment.value.node {
+                                if let Expression::Property(rhs_prop) = &rhs_slice.target.node {
+                                    if let Expression::Primary(PrimaryExpr::Identifier(rhs_arr)) = &rhs_prop.object.node {
+                                        if self.array_sizes.contains_key(rhs_arr) || self.array_params.contains_key(rhs_arr) {
+                                            VectorOperand::Vector(rhs_arr.clone(), rhs_prop.property.clone())
+                                        } else {
+                                            VectorOperand::Scalar(self.generate_expression(&assignment.value))
+                                        }
+                                    } else {
+                                        VectorOperand::Scalar(self.generate_expression(&assignment.value))
+                                    }
                                 } else {
                                     VectorOperand::Scalar(self.generate_expression(&assignment.value))
                                 }
                             } else {
                                 VectorOperand::Scalar(self.generate_expression(&assignment.value))
-                            }
-                        } else {
-                            VectorOperand::Scalar(self.generate_expression(&assignment.value))
-                        };
-                        
-                        let size = *self.array_sizes.get(target_array).unwrap_or(&0); // 100000 per precaució
-                        self.emit(IRInstruction::FlatVectorApply(
-                            target_array.clone(),
-                            vec![(prop_access.property.clone(), assignment.op.clone(), right_val)],
-                            size,
-                        ));
-                        return;
+                            };
+                            
+                            let size = *self.array_sizes.get(target_array).unwrap_or(&0); // 100000 per precaució
+                            
+                            let start_op = if let Some(start_expr) = &target_slice.start {
+                                self.generate_expression(start_expr)
+                            } else {
+                                IROperand::LiteralInt(0)
+                            };
+                            
+                            let end_op = if let Some(end_expr) = &target_slice.end {
+                                self.generate_expression(end_expr)
+                            } else {
+                                IROperand::LiteralInt(size)
+                            };
+                            
+                            self.emit(IRInstruction::FlatVectorApply(
+                                target_array.clone(),
+                                vec![(prop_access.property.clone(), assignment.op.clone(), right_val)],
+                                start_op,
+                                end_op,
+                                size,
+                            ));
+                            return;
+                        }
+                    }
+                }
+                
+                if let Expression::Index(index_expr) = &assignment.target.node {
+                    if let Expression::Property(prop_access) = &index_expr.target.node {
+                        if let Expression::Primary(PrimaryExpr::Identifier(target_array)) = &prop_access.object.node {
+                            let val = self.generate_expression(&assignment.value);
+                            let idx = self.generate_expression(&index_expr.index);
+                            let size = *self.array_sizes.get(target_array).unwrap_or(&0);
+                            self.emit(IRInstruction::StoreArrayElement(
+                                target_array.clone(),
+                                prop_access.property.clone(),
+                                idx,
+                                val,
+                                size
+                            ));
+                            return;
+                        }
                     }
                 }
 
@@ -381,6 +445,10 @@ impl IRGenerator {
             }
             Statement::Expr(expr) => {
                 self.generate_expression(expr);
+            }
+            Statement::Free(expr) => {
+                let target = self.generate_expression(expr);
+                self.emit(IRInstruction::Free(target));
             }
         }
     }
@@ -620,6 +688,27 @@ impl IRGenerator {
                 self.finish_block(Terminator::Jump(end_label.clone()));
                 self.start_block(end_label);
                 dest_temp
+            }
+            Expression::VectorSlice(slice_expr) => {
+                // VectorSlice evaluates to its target array reference when used as an expression
+                self.generate_expression(&slice_expr.target)
+            }
+            Expression::Index(index_expr) => {
+                let dest = self.new_temp();
+                if let Expression::Property(prop_access) = &index_expr.target.node {
+                    if let Expression::Primary(PrimaryExpr::Identifier(target_array)) = &prop_access.object.node {
+                        let idx = self.generate_expression(&index_expr.index);
+                        let size = *self.array_sizes.get(target_array).unwrap_or(&0);
+                        self.emit(IRInstruction::LoadArrayElement(
+                            dest.clone(),
+                            target_array.clone(),
+                            prop_access.property.clone(),
+                            idx,
+                            size
+                        ));
+                    }
+                }
+                dest
             }
         }
     }

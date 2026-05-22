@@ -1,0 +1,37 @@
+// tests/vector_slice.nera
+data Particle {
+    x: Float
+    vx: Float
+}
+
+fn main() -> Int {
+    mut swarm: Particle[100] = []
+    
+    // 1. Vector += Vector (Adding velocities to positions)
+    swarm.x[] += swarm.vx[]
+    
+    // 2. Vector *= Scalar (Applying drag/friction to all particles)
+    swarm.vx[] *= 0.99
+    
+    // 3. Vector = Scalar (Resetting all positions to 0)
+    swarm.x[] = 0.0
+    
+    // 4. Vector = Vector (Copying velocities to positions)
+    swarm.x[] = swarm.vx[]
+    
+    // 5. Partial Vector Slicing
+    swarm.x[10..50] += swarm.vx[10..50]
+    
+    // 6. Partial Scalar operations
+    swarm.vx[50..100] = 0.0
+    
+    // 7. Missing bounds partial slices
+    swarm.x[..20] += swarm.vx[..20]
+    swarm.x[20..] = 5.0
+    
+    // 8. Single Array Indexing
+    swarm.x[20] = 100.0
+    let a = swarm.x[20]
+    
+    return 0
+}

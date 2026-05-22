@@ -1,0 +1,7 @@
+extern fn print_int(value: Int) -> Void
+extern fn print_float(value: Float) -> Void
+extern fn puts(value: String) -> Int
+
+fn print_string(value: String) {
+    puts(value)
+}

@@ -19,6 +19,7 @@ pub enum Declaration {
     Data(DataDecl),
     Choice(ChoiceDecl),
     Fn(FnDecl),
+    Extern(ExternDecl),
     Var(VarDecl),
 }
 
@@ -60,6 +61,14 @@ pub struct FnDecl {
     pub body: Spanned<Block>,
 }
 
+/// An external function declaration, e.g. `extern fn printf(fmt: String) -> Int`
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternDecl {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_type: Option<Spanned<Type>>,
+}
+
 /// A parameter in a function declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
@@ -93,6 +102,7 @@ pub enum Statement {
     While(WhileStmt),
     Return(ReturnStmt),
     Expr(Spanned<Expression>),
+    Free(Spanned<Expression>),
 }
 
 /// A variable declaration, e.g. `let x: Int = 5` or `mut y = 10`
@@ -166,6 +176,8 @@ pub enum Expression {
     When(Box<WhenExpr>),
     Alloc(Box<AllocExpr>),
     Deref(Box<Spanned<Expression>>),
+    VectorSlice(Box<VectorSliceExpr>),
+    Index(Box<IndexExpr>),
     VariantConstruct(Box<VariantConstructExpr>),
     Primary(PrimaryExpr),
 }
@@ -237,4 +249,19 @@ pub struct FunctionCall {
 pub struct PropertyAccess {
     pub object: Spanned<Expression>,
     pub property: String,
+}
+
+/// An explicit vector slice, e.g. `swarm.x[]` or `swarm.x[start..end]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorSliceExpr {
+    pub target: Spanned<Expression>,
+    pub start: Option<Spanned<Expression>>,
+    pub end: Option<Spanned<Expression>>,
+}
+
+/// An array index, e.g. `swarm.x[20]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexExpr {
+    pub target: Spanned<Expression>,
+    pub index: Spanned<Expression>,
 }

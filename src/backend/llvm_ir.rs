@@ -101,10 +101,12 @@ pub enum LLVMInstruction {
     ZExt(String, LLVMType, LLVMValue, LLVMType), // dest, dest_ty, val, src_ty
     Trunc(String, LLVMType, LLVMValue, LLVMType),
     BitCast(String, LLVMType, LLVMValue, LLVMType),
+    IntToPtr(String, LLVMType, LLVMValue, LLVMType),
+    PtrToInt(String, LLVMType, LLVMValue, LLVMType),
     Phi(String, LLVMType, Vec<(LLVMValue, String)>), // dest, type, [(val, block)]
     Call(Option<String>, LLVMType, String, Vec<LLVMValue>), // dest, ret_type, name, args
-    Br(String),
-    CondBr(LLVMValue, String, String),
+    Br(String, Option<String>),
+    CondBr(LLVMValue, String, String, Option<String>),
     Ret(Option<LLVMValue>),
     Unreachable,
 }
@@ -142,6 +144,8 @@ impl LLVMInstruction {
             LLVMInstruction::ZExt(dest, dest_ty, val, _src_ty) => format!("  %{} = zext {} to {}", dest, val.typed_string(), dest_ty.to_string()),
             LLVMInstruction::Trunc(dest, dest_ty, val, _src_ty) => format!("  %{} = trunc {} to {}", dest, val.typed_string(), dest_ty.to_string()),
             LLVMInstruction::BitCast(dest, dest_ty, val, _src_ty) => format!("  %{} = bitcast {} to {}", dest, val.typed_string(), dest_ty.to_string()),
+            LLVMInstruction::IntToPtr(dest, dest_ty, val, _src_ty) => format!("  %{} = inttoptr {} to {}", dest, val.typed_string(), dest_ty.to_string()),
+            LLVMInstruction::PtrToInt(dest, dest_ty, val, _src_ty) => format!("  %{} = ptrtoint {} to {}", dest, val.typed_string(), dest_ty.to_string()),
             LLVMInstruction::Phi(dest, ty, incoming) => {
                 let inc_strs: Vec<String> = incoming.iter().map(|(v, b)| format!("[ {}, %{} ]", v.to_string(), b)).collect();
                 format!("  %{} = phi {} {}", dest, ty.to_string(), inc_strs.join(", "))
@@ -154,8 +158,16 @@ impl LLVMInstruction {
                     format!("  call {} @{}({})", ret_ty.to_string(), name, arg_strs.join(", "))
                 }
             }
-            LLVMInstruction::Br(lbl) => format!("  br label %{}", lbl),
-            LLVMInstruction::CondBr(cond, true_lbl, false_lbl) => format!("  br i1 {}, label %{}, label %{}", cond.to_string(), true_lbl, false_lbl),
+            LLVMInstruction::Br(lbl, meta) => {
+                let mut s = format!("  br label %{}", lbl);
+                if let Some(m) = meta { s.push_str(&format!(", {}", m)); }
+                s
+            }
+            LLVMInstruction::CondBr(cond, true_lbl, false_lbl, meta) => {
+                let mut s = format!("  br i1 {}, label %{}, label %{}", cond.to_string(), true_lbl, false_lbl);
+                if let Some(m) = meta { s.push_str(&format!(", {}", m)); }
+                s
+            }
             LLVMInstruction::Ret(Some(val)) => format!("  ret {}", val.typed_string()),
             LLVMInstruction::Ret(None) => "  ret void".to_string(),
             LLVMInstruction::Unreachable => "  unreachable".to_string(),
@@ -303,6 +315,12 @@ impl IRBuilder {
         LLVMValue::Reg(dest, ty)
     }
 
+    pub fn build_add_with_name(&mut self, name: &str, l: LLVMValue, r: LLVMValue) -> LLVMValue {
+        let ty = l.get_type();
+        self.push_instr(LLVMInstruction::Add(name.to_string(), ty.clone(), l, r));
+        LLVMValue::Reg(name.to_string(), ty)
+    }
+
     pub fn build_fadd(&mut self, l: LLVMValue, r: LLVMValue) -> LLVMValue {
         let dest = self.next_reg_name();
         let ty = l.get_type();
@@ -401,6 +419,20 @@ impl IRBuilder {
         LLVMValue::Reg(dest, dest_ty)
     }
 
+    pub fn build_int_to_ptr(&mut self, val: LLVMValue, dest_ty: LLVMType) -> LLVMValue {
+        let dest = self.next_reg_name();
+        let src_ty = val.get_type();
+        self.push_instr(LLVMInstruction::IntToPtr(dest.clone(), dest_ty.clone(), val, src_ty));
+        LLVMValue::Reg(dest, dest_ty)
+    }
+
+    pub fn build_ptr_to_int(&mut self, val: LLVMValue, dest_ty: LLVMType) -> LLVMValue {
+        let dest = self.next_reg_name();
+        let src_ty = val.get_type();
+        self.push_instr(LLVMInstruction::PtrToInt(dest.clone(), dest_ty.clone(), val, src_ty));
+        LLVMValue::Reg(dest, dest_ty)
+    }
+
     pub fn build_phi(&mut self, ty: LLVMType, incoming: Vec<(LLVMValue, String)>) -> LLVMValue {
         let dest = self.next_reg_name();
         self.push_instr(LLVMInstruction::Phi(dest.clone(), ty.clone(), incoming));
@@ -418,12 +450,12 @@ impl IRBuilder {
         }
     }
 
-    pub fn build_br(&mut self, lbl: &str) {
-        self.push_instr(LLVMInstruction::Br(lbl.to_string()));
+    pub fn build_br(&mut self, lbl: &str, meta: Option<&str>) {
+        self.push_instr(LLVMInstruction::Br(lbl.to_string(), meta.map(|s| s.to_string())));
     }
 
-    pub fn build_cond_br(&mut self, cond: LLVMValue, true_lbl: &str, false_lbl: &str) {
-        self.push_instr(LLVMInstruction::CondBr(cond, true_lbl.to_string(), false_lbl.to_string()));
+    pub fn build_cond_br(&mut self, cond: LLVMValue, true_lbl: &str, false_lbl: &str, meta: Option<&str>) {
+        self.push_instr(LLVMInstruction::CondBr(cond, true_lbl.to_string(), false_lbl.to_string(), meta.map(|s| s.to_string())));
     }
 
     pub fn build_ret(&mut self, val: Option<LLVMValue>) {

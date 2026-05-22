@@ -41,8 +41,17 @@ impl IROptimizer {
     fn run_soa_pass_globals(&self, instructions: &[IRInstruction]) -> Vec<(String, i64)> {
         let mut soa_map = HashMap::new();
         for instr in instructions {
-            if let IRInstruction::FlatVectorApply(target_array, _, size) = instr {
-                soa_map.insert(target_array.clone(), *size);
+            if let IRInstruction::FlatVectorApply(target_array, ops, _start, _end, size) = instr {
+                for (prop, _, rhs) in ops {
+                    soa_map.insert(format!("{}_{}", target_array, prop), *size);
+                    if let VectorOperand::Vector(rhs_arr, rhs_prop) = rhs {
+                        soa_map.insert(format!("{}_{}", rhs_arr, rhs_prop), *size);
+                    }
+                }
+            } else if let IRInstruction::LoadArrayElement(_, array, prop, _, size) = instr {
+                soa_map.insert(format!("{}_{}", array, prop), *size);
+            } else if let IRInstruction::StoreArrayElement(array, prop, _, _, size) = instr {
+                soa_map.insert(format!("{}_{}", array, prop), *size);
             }
         }
         soa_map.into_iter().collect()
@@ -52,8 +61,17 @@ impl IROptimizer {
         let mut soa_map = HashMap::new();
         for block in &func.blocks {
             for instr in &block.instrs {
-                if let IRInstruction::FlatVectorApply(target_array, _, size) = instr {
-                    soa_map.insert(target_array.clone(), *size);
+                if let IRInstruction::FlatVectorApply(target_array, ops, _start, _end, size) = instr {
+                    for (prop, _, rhs) in ops {
+                        soa_map.insert(format!("{}_{}", target_array, prop), *size);
+                        if let VectorOperand::Vector(rhs_arr, rhs_prop) = rhs {
+                            soa_map.insert(format!("{}_{}", rhs_arr, rhs_prop), *size);
+                        }
+                    }
+                } else if let IRInstruction::LoadArrayElement(_, array, prop, _, size) = instr {
+                    soa_map.insert(format!("{}_{}", array, prop), *size);
+                } else if let IRInstruction::StoreArrayElement(array, prop, _, _, size) = instr {
+                    soa_map.insert(format!("{}_{}", array, prop), *size);
                 }
             }
         }
@@ -65,10 +83,10 @@ impl IROptimizer {
             let mut fused_instrs: Vec<IRInstruction> = Vec::new();
             
             for instr in &block.instrs {
-                if let IRInstruction::FlatVectorApply(target, ops, size) = instr {
+                if let IRInstruction::FlatVectorApply(target, ops, start, end, size) = instr {
                     let mut merged = false;
-                    if let Some(IRInstruction::FlatVectorApply(last_target, last_ops, last_size)) = fused_instrs.last_mut() {
-                        if target == last_target && size == last_size {
+                    if let Some(IRInstruction::FlatVectorApply(last_target, last_ops, last_start, last_end, last_size)) = fused_instrs.last_mut() {
+                        if target == last_target && size == last_size && start == last_start && end == last_end {
                             last_ops.extend(ops.clone());
                             merged = true;
                         }
@@ -131,17 +149,26 @@ impl IROptimizer {
                     add_def(dest);
                 }
             }
-            IRInstruction::FlatVectorApply(_, operations, _) => {
-                for (_, _, val) in operations {
-                    match val {
-                        VectorOperand::Scalar(op) => add_use(op),
-                        VectorOperand::Vector(_, _) => {}
+            IRInstruction::FlatVectorApply(_, ops, start, end, _) => {
+                add_use(start);
+                add_use(end);
+                for (_, _, rhs) in ops {
+                    if let VectorOperand::Scalar(op) = rhs {
+                        add_use(op);
                     }
                 }
             }
             IRInstruction::ExtractTag(dest, obj) => {
                 add_use(obj);
                 add_def(dest);
+            }
+            IRInstruction::LoadArrayElement(dest, _, _, index, _) => {
+                add_use(index);
+                add_def(dest);
+            }
+            IRInstruction::StoreArrayElement(_, _, index, val, _) => {
+                add_use(index);
+                add_use(val);
             }
             IRInstruction::ExtractPayload(dest, obj, _) => {
                 add_use(obj);
@@ -163,6 +190,9 @@ impl IROptimizer {
                     add_use(arg);
                 }
                 add_def(dest);
+            }
+            IRInstruction::Free(ptr) => {
+                add_use(ptr);
             }
         }
         (uses, defs)
@@ -297,7 +327,7 @@ impl IROptimizer {
                 let (uses, defs) = self.instr_use_def(instr);
                 let has_side_effects = matches!(
                     instr,
-                    IRInstruction::Call(_, _, _) | IRInstruction::StoreProperty(_, _, _) | IRInstruction::FlatVectorApply(_, _, _)
+                    IRInstruction::Call(_, _, _) | IRInstruction::StoreProperty(_, _, _) | IRInstruction::FlatVectorApply(..) | IRInstruction::StoreArrayElement(..) | IRInstruction::Free(_)
                 );
 
                 let mut is_dead = true;

@@ -118,13 +118,8 @@ pub struct Environment {
 
 impl Environment {
     pub fn new() -> Self {
-        let mut global_scope = HashMap::new();
-        global_scope.insert("print".to_string(), Symbol::Function(FunctionSymbol {
-            params: vec![("value".to_string(), TypeInfo::Unknown)],
-            return_ty: TypeInfo::Void,
-        }));
         Self {
-            scopes: vec![global_scope],
+            scopes: vec![HashMap::new()],
         }
     }
 
@@ -218,6 +213,18 @@ impl<'a> SemanticAnalyzer<'a> {
                 };
                 self.env.define(fn_decl.name.clone(), Symbol::Function(FunctionSymbol { params, return_ty }));
             }
+            Declaration::Extern(extern_decl) => {
+                let mut params = Vec::new();
+                for param in &extern_decl.params {
+                    params.push((param.name.clone(), TypeInfo::from_ast(&param.ty.node)));
+                }
+                let return_ty = if let Some(ty) = &extern_decl.return_type {
+                    TypeInfo::from_ast(&ty.node)
+                } else {
+                    TypeInfo::Void
+                };
+                self.env.define(extern_decl.name.clone(), Symbol::Function(FunctionSymbol { params, return_ty }));
+            }
             Declaration::Var(_) => {}
             Declaration::Choice(choice_decl) => {
                 let mut variants = HashMap::new();
@@ -236,6 +243,7 @@ impl<'a> SemanticAnalyzer<'a> {
         match &mut decl.node {
             Declaration::Data(_) => {}
             Declaration::Choice(_) => {}
+            Declaration::Extern(_) => {}
             Declaration::Fn(fn_decl) => {
                 self.env.enter_scope();
                 for param in &fn_decl.params {
@@ -343,6 +351,19 @@ impl<'a> SemanticAnalyzer<'a> {
                         self.report_error(&assignment.value.span, &format!("Type mismatch in assignment: cannot assign {} to {}", right_ty.to_string(), left_ty.to_string()));
                     }
                 }
+                
+                if let Expression::VectorSlice(left_slice) = &assignment.target.node {
+                    if let Expression::VectorSlice(right_slice) = &assignment.value.node {
+                        let left_size = self.get_slice_size(left_slice);
+                        let right_size = self.get_slice_size(right_slice);
+                        
+                        if let (Some(l), Some(r)) = (left_size, right_size) {
+                            if l != r {
+                                self.report_error(&assignment.value.span, &format!("Vector slice size mismatch: left side has size {}, but right side has size {}", l, r));
+                            }
+                        }
+                    }
+                }
 
                 if let Some(root_name) = self.get_root_identifier(&assignment.target) {
                     if let Some(Symbol::Variable(var_sym)) = self.env.resolve(&root_name) {
@@ -430,6 +451,14 @@ impl<'a> SemanticAnalyzer<'a> {
             }
             Statement::Expr(expr) => {
                 self.analyze_expression(expr);
+            }
+            Statement::Free(expr) => {
+                let ty = self.analyze_expression(expr);
+                match ty {
+                    TypeInfo::Pointer(_) => {}
+                    TypeInfo::Nullable(inner) if matches!(*inner, TypeInfo::Pointer(_)) => {}
+                    _ => self.report_error(&expr.span, &format!("Cannot free non-pointer type '{}'", ty.to_string())),
+                }
             }
         }
     }
@@ -606,7 +635,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
                 
                 if let Expression::Primary(PrimaryExpr::Identifier(name)) = &mut func_call.callee.node {
-                    if name.starts_with("print") {
+                    if name == "print" {
                         if arg_types.len() != 1 {
                             self.report_error(&func_call.callee.span, "Function 'print' expects exactly 1 argument");
                         } else {
@@ -618,7 +647,6 @@ impl<'a> SemanticAnalyzer<'a> {
                                 *name = "print_int".to_string();
                             }
                         }
-                        return TypeInfo::Void;
                     }
                     
                     let fn_info = if let Some(Symbol::Function(fn_sym)) = self.env.resolve(name) {
@@ -768,6 +796,31 @@ impl<'a> SemanticAnalyzer<'a> {
                     TypeInfo::Unknown
                 }
             }
+            Expression::VectorSlice(slice_expr) => {
+                let target_ty = self.analyze_expression(&mut slice_expr.target);
+                if let Some(start) = &mut slice_expr.start {
+                    let start_ty = self.analyze_expression(start);
+                    if start_ty != TypeInfo::Int && start_ty != TypeInfo::Unknown {
+                        self.report_error(&start.span, "Slice start bound must be an integer");
+                    }
+                }
+                if let Some(end) = &mut slice_expr.end {
+                    let end_ty = self.analyze_expression(end);
+                    if end_ty != TypeInfo::Int && end_ty != TypeInfo::Unknown {
+                        self.report_error(&end.span, "Slice end bound must be an integer");
+                    }
+                }
+                // Return the array/target type
+                target_ty
+            }
+            Expression::Index(index_expr) => {
+                let target_ty = self.analyze_expression(&mut index_expr.target);
+                let index_ty = self.analyze_expression(&mut index_expr.index);
+                if index_ty != TypeInfo::Int && index_ty != TypeInfo::Unknown {
+                    self.report_error(&index_expr.index.span, "Array index must be an integer");
+                }
+                target_ty
+            }
             Expression::Primary(primary) => {
                 match primary {
                     PrimaryExpr::Integer(_) => TypeInfo::Int,
@@ -816,8 +869,40 @@ impl<'a> SemanticAnalyzer<'a> {
         match &expr.node {
             Expression::Primary(PrimaryExpr::Identifier(name)) => Some(name.clone()),
             Expression::Property(prop_access) => self.get_root_identifier(&prop_access.object),
+            Expression::VectorSlice(slice_expr) => self.get_root_identifier(&slice_expr.target),
+            Expression::Index(index_expr) => self.get_root_identifier(&index_expr.target),
             Expression::Deref(inner) => self.get_root_identifier(inner),
             _ => None,
         }
+    }
+
+    fn evaluate_const_int(&self, expr: &Expression) -> Option<i64> {
+        match expr {
+            Expression::Primary(PrimaryExpr::Integer(i)) => Some(*i),
+            _ => None,
+        }
+    }
+
+    fn get_slice_size(&self, slice_expr: &VectorSliceExpr) -> Option<i64> {
+        let root_name = self.get_root_identifier(&slice_expr.target)?;
+        let capacity = if let Some(Symbol::Variable(var_sym)) = self.env.resolve(&root_name) {
+            var_sym.size?
+        } else {
+            return None;
+        };
+
+        let start_val = if let Some(start) = &slice_expr.start {
+            self.evaluate_const_int(&start.node)?
+        } else {
+            0
+        };
+
+        let end_val = if let Some(end) = &slice_expr.end {
+            self.evaluate_const_int(&end.node)?
+        } else {
+            capacity
+        };
+
+        Some(end_val - start_val)
     }
 }

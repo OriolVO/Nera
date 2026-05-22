@@ -1,0 +1,7 @@
+use std.io
+
+fn main() {
+    print("Hello, Nera standard library!")
+    print(12345)
+    print(3.14)
+}

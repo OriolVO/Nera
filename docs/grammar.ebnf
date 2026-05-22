@@ -1,11 +1,11 @@
 /* ===================================================
-   NERA GRAMMAR v1.5 (Production & Synchronized)
-   Last updated: Phase 2.5 – ADT Variant Constructors
+   NERA GRAMMAR v1.6 (Production & Synchronized)
+   Last updated: Phase 4.1 – Advanced Slicing & Single Element Indexing
    =================================================== */
 
 Program         ::= Declaration*
 
-Declaration     ::= DataDecl | ChoiceDecl | FnDecl | VarDecl
+Declaration     ::= DataDecl | ChoiceDecl | FnDecl | ExternDecl | VarDecl
 
 
 /* --- DATA STRUCTURES --- */
@@ -20,8 +20,9 @@ ChoiceDecl      ::= "choice" Identifier "{" (VariantDecl ","?)* "}"
 VariantDecl     ::= Identifier ("(" Type ("," Type)* ")")?
 
 
-/* --- FUNCTIONS --- */
+/* --- FUNCTIONS & FFI --- */
 
+ExternDecl      ::= "extern" "fn" Identifier "(" ParamList? ")" ("->" Type)?
 FnDecl          ::= "fn" Identifier "(" ParamList? ")" ("->" Type)? Block
 ParamList       ::= Param ("," Param)*
 Param           ::= "mut"? Identifier ":" Type
@@ -73,8 +74,10 @@ MultiplicativeExpr ::= PostfixExpr (("*" | "/") PostfixExpr)*
      ChoiceName.Variant(args) – variant constructor with payload (resolved in sema)
      expr(args)          – direct function call
      expr^               – pointer dereference
+     expr[]              – explicit vector slice / indexing (e.g. swarm.x[])
 */
 PostfixExpr     ::= PrimaryExpr ( "." Identifier ( "(" ArgumentList? ")" )?
+                                 | "[" (Expression? ".." Expression? | Expression)? "]"
                                  | "(" ArgumentList? ")"
                                  | "^"
                                  )*
