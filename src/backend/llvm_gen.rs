@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::frontend::sema::TypeInfo;
 use crate::frontend::ast::{AssignOp, BinaryOp};
 use crate::error::CompileError;
-use crate::midend::ir::{IRInstruction, IROperand, IRFunction, Terminator};
+use crate::midend::ir::{IRInstruction, IROperand, IRFunction, Terminator, VectorOperand};
 use crate::midend::optimizer::OptimizedIR;
 use crate::backend::llvm_ir::{LLVMType, LLVMValue, IRBuilder};
 
@@ -444,28 +444,49 @@ impl LLVMGenerator {
                 // Align 32 for SIMD capability
                 self.builder.build_store(val_val, casted_ptr, Some(32));
             }
-            IRInstruction::FlatVectorApply(target_array, prop, op, right_val, size) => {
-                let r_val = self.operand_to_value(right_val)?;
+            IRInstruction::FlatVectorApply(target_array, operations, size) => {
                 let loop_head = format!("vec_loop_head_{}", self.builder.next_reg_name());
                 let loop_body = format!("vec_loop_body_{}", self.builder.next_reg_name());
                 let loop_end = format!("vec_loop_end_{}", self.builder.next_reg_name());
                 
-                let pred_block = self.builder.current_block_name().unwrap_or("entry".to_string());
+                let mut op_data = Vec::new();
+                for (prop, op, right_val) in operations {
+                    let field_key = format!("{}_{}", target_array, prop);
+                    
+                    let array_ptr = if let Some(p) = self.function_params.get(&field_key) {
+                        p.clone()
+                    } else if let Some(p) = self.function_params.get(target_array) {
+                        p.clone()
+                    } else {
+                        return Err(CompileError::BackendError("Missing array pointer for target array in FlatVectorApply".to_string()));
+                    };
 
-                let field_key = format!("{}_{}", target_array, prop);
-                
-                let array_ptr = if let Some(p) = self.function_params.get(&field_key) {
-                    p.clone()
-                } else if let Some(p) = self.function_params.get(target_array) {
-                    p.clone()
-                } else {
-                    return Err(CompileError::BackendError("Missing array pointer for target array in FlatVectorApply".to_string()));
-                };
+                    let inner_ty = match array_ptr.get_type() {
+                        LLVMType::Pointer(inner) => *inner,
+                        _ => LLVMType::I64,
+                    };
+                    
+                    let rhs_ptr_info = match right_val {
+                        VectorOperand::Vector(rhs_arr, rhs_prop) => {
+                            let rhs_field_key = format!("{}_{}", rhs_arr, rhs_prop);
+                            if let Some(p) = self.function_params.get(&rhs_field_key) {
+                                Some((p.clone(), rhs_arr.clone(), rhs_prop.clone()))
+                            } else if let Some(p) = self.function_params.get(rhs_arr) {
+                                Some((p.clone(), rhs_arr.clone(), rhs_prop.clone()))
+                            } else {
+                                return Err(CompileError::BackendError("Missing array pointer for RHS array in FlatVectorApply".to_string()));
+                            }
+                        },
+                        VectorOperand::Scalar(_) => None,
+                    };
 
-                let inner_ty = match array_ptr.get_type() {
-                    LLVMType::Pointer(inner) => *inner,
-                    _ => LLVMType::I64,
-                };
+                    let scalar_r_val = match right_val {
+                        VectorOperand::Scalar(val) => Some(self.operand_to_value(val)?),
+                        VectorOperand::Vector(_, _) => None,
+                    };
+
+                    op_data.push((field_key, prop, op.clone(), array_ptr, inner_ty, rhs_ptr_info, scalar_r_val));
+                }
 
                 let idx_ptr = self.shared_vec_idx.clone().ok_or_else(|| CompileError::BackendError("Missing shared vector index inside FlatVectorApply block".to_string()))?;
                 self.builder.build_store(LLVMValue::ConstI64(0), idx_ptr.clone(), None);
@@ -479,25 +500,45 @@ impl LLVMGenerator {
                 self.builder.build_cond_br(cmp, &loop_body, &loop_end);
                 
                 self.builder.start_block(&loop_body);
-                let ptr = self.builder.build_gep(inner_ty.clone(), array_ptr, vec![idx_val.clone()])?;
                 
-                let field_ty = self.type_env.get(&field_key).or_else(|| self.type_env.get(target_array)).unwrap_or(&TypeInfo::Int);
-                let target_llvm_ty = self.type_to_llvm(field_ty);
-                let casted_ptr = self.builder.build_bitcast(ptr, LLVMType::Pointer(Box::new(target_llvm_ty)));
-
-                if *op == AssignOp::Assign {
-                    self.builder.build_store(r_val, casted_ptr, Some(32));
-                } else {
-                    let loaded = self.builder.build_load(casted_ptr.clone(), Some(32))?;
-                    let is_float = loaded.get_type() == LLVMType::Double;
-                    let result = match op {
-                        AssignOp::AddAssign => if is_float { self.builder.build_fadd(loaded, r_val) } else { self.builder.build_add(loaded, r_val) },
-                        AssignOp::SubAssign => if is_float { self.builder.build_fsub(loaded, r_val) } else { self.builder.build_sub(loaded, r_val) },
-                        AssignOp::MulAssign => if is_float { self.builder.build_fmul(loaded, r_val) } else { self.builder.build_mul(loaded, r_val) },
-                        AssignOp::DivAssign => if is_float { self.builder.build_fdiv(loaded, r_val) } else { self.builder.build_sdiv(loaded, r_val) },
-                        AssignOp::Assign => unreachable!(),
+                for (field_key, _, op, array_ptr, inner_ty, rhs_ptr_info, scalar_r_val) in &op_data {
+                    let actual_r_val = if let Some((rhs_ptr, rhs_arr, rhs_prop)) = rhs_ptr_info {
+                        let rhs_inner_ty = match rhs_ptr.get_type() {
+                            LLVMType::Pointer(inner) => *inner,
+                            _ => LLVMType::I64,
+                        };
+                        let rhs_gep = self.builder.build_gep(rhs_inner_ty.clone(), rhs_ptr.clone(), vec![idx_val.clone()])?;
+                        
+                        let rhs_field_key = format!("{}_{}", rhs_arr, rhs_prop);
+                        let rhs_field_ty = self.type_env.get(&rhs_field_key).or_else(|| self.type_env.get(rhs_arr)).unwrap_or(&TypeInfo::Int);
+                        let rhs_target_llvm_ty = self.type_to_llvm(rhs_field_ty);
+                        let rhs_casted_ptr = self.builder.build_bitcast(rhs_gep, LLVMType::Pointer(Box::new(rhs_target_llvm_ty)));
+                        
+                        self.builder.build_load(rhs_casted_ptr, Some(32))?
+                    } else {
+                        scalar_r_val.clone().unwrap()
                     };
-                    self.builder.build_store(result, casted_ptr, Some(32));
+
+                    let ptr = self.builder.build_gep(inner_ty.clone(), array_ptr.clone(), vec![idx_val.clone()])?;
+                    
+                    let field_ty = self.type_env.get(field_key).or_else(|| self.type_env.get(target_array)).unwrap_or(&TypeInfo::Int);
+                    let target_llvm_ty = self.type_to_llvm(field_ty);
+                    let casted_ptr = self.builder.build_bitcast(ptr, LLVMType::Pointer(Box::new(target_llvm_ty)));
+
+                    if *op == AssignOp::Assign {
+                        self.builder.build_store(actual_r_val, casted_ptr, Some(32));
+                    } else {
+                        let loaded = self.builder.build_load(casted_ptr.clone(), Some(32))?;
+                        let is_float = loaded.get_type() == LLVMType::Double;
+                        let result = match op {
+                            AssignOp::AddAssign => if is_float { self.builder.build_fadd(loaded, actual_r_val) } else { self.builder.build_add(loaded, actual_r_val) },
+                            AssignOp::SubAssign => if is_float { self.builder.build_fsub(loaded, actual_r_val) } else { self.builder.build_sub(loaded, actual_r_val) },
+                            AssignOp::MulAssign => if is_float { self.builder.build_fmul(loaded, actual_r_val) } else { self.builder.build_mul(loaded, actual_r_val) },
+                            AssignOp::DivAssign => if is_float { self.builder.build_fdiv(loaded, actual_r_val) } else { self.builder.build_sdiv(loaded, actual_r_val) },
+                            AssignOp::Assign => unreachable!(),
+                        };
+                        self.builder.build_store(result, casted_ptr, Some(32));
+                    }
                 }
                 
                 let next_idx = self.builder.build_add(idx_val, LLVMValue::ConstI64(1));

@@ -1,5 +1,5 @@
 use std::collections::{HashSet, HashMap};
-use super::ir::{IRInstruction, IROperand, IRFunction, Terminator};
+use super::ir::{IRInstruction, IROperand, IRFunction, Terminator, VectorOperand};
 use crate::error::CompileError;
 
 pub struct OptimizedIR {
@@ -23,6 +23,7 @@ impl IROptimizer {
             let func_soa = self.run_soa_pass_func(&func);
             soa_arrays.extend(func_soa);
 
+            self.run_loop_fusion(&mut func);
             self.run_liveness_and_dce(&mut func)?;
             optimized_functions.push(func);
         }
@@ -40,7 +41,7 @@ impl IROptimizer {
     fn run_soa_pass_globals(&self, instructions: &[IRInstruction]) -> Vec<(String, i64)> {
         let mut soa_map = HashMap::new();
         for instr in instructions {
-            if let IRInstruction::FlatVectorApply(target_array, _, _, _, size) = instr {
+            if let IRInstruction::FlatVectorApply(target_array, _, size) = instr {
                 soa_map.insert(target_array.clone(), *size);
             }
         }
@@ -51,12 +52,37 @@ impl IROptimizer {
         let mut soa_map = HashMap::new();
         for block in &func.blocks {
             for instr in &block.instrs {
-                if let IRInstruction::FlatVectorApply(target_array, _, _, _, size) = instr {
+                if let IRInstruction::FlatVectorApply(target_array, _, size) = instr {
                     soa_map.insert(target_array.clone(), *size);
                 }
             }
         }
         soa_map.into_iter().collect()
+    }
+
+    fn run_loop_fusion(&self, func: &mut IRFunction) {
+        for block in &mut func.blocks {
+            let mut fused_instrs: Vec<IRInstruction> = Vec::new();
+            
+            for instr in &block.instrs {
+                if let IRInstruction::FlatVectorApply(target, ops, size) = instr {
+                    let mut merged = false;
+                    if let Some(IRInstruction::FlatVectorApply(last_target, last_ops, last_size)) = fused_instrs.last_mut() {
+                        if target == last_target && size == last_size {
+                            last_ops.extend(ops.clone());
+                            merged = true;
+                        }
+                    }
+                    if !merged {
+                        fused_instrs.push(instr.clone());
+                    }
+                } else {
+                    fused_instrs.push(instr.clone());
+                }
+            }
+            
+            block.instrs = fused_instrs;
+        }
     }
 
     fn operand_to_var(&self, op: &IROperand) -> Option<String> {
@@ -105,8 +131,13 @@ impl IROptimizer {
                     add_def(dest);
                 }
             }
-            IRInstruction::FlatVectorApply(_, _, _, val, _) => {
-                add_use(val);
+            IRInstruction::FlatVectorApply(_, operations, _) => {
+                for (_, _, val) in operations {
+                    match val {
+                        VectorOperand::Scalar(op) => add_use(op),
+                        VectorOperand::Vector(_, _) => {}
+                    }
+                }
             }
             IRInstruction::ExtractTag(dest, obj) => {
                 add_use(obj);
@@ -266,7 +297,7 @@ impl IROptimizer {
                 let (uses, defs) = self.instr_use_def(instr);
                 let has_side_effects = matches!(
                     instr,
-                    IRInstruction::Call(_, _, _) | IRInstruction::StoreProperty(_, _, _) | IRInstruction::FlatVectorApply(_, _, _, _, _)
+                    IRInstruction::Call(_, _, _) | IRInstruction::StoreProperty(_, _, _) | IRInstruction::FlatVectorApply(_, _, _)
                 );
 
                 let mut is_dead = true;

@@ -39,13 +39,19 @@ pub struct IRFunction {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum VectorOperand {
+    Scalar(IROperand),
+    Vector(String, String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum IRInstruction {
     Assign(IROperand, IROperand), // dest, src
     BinaryOp(IROperand, BinaryOp, IROperand, IROperand), // dest, op, left, right
     LoadProperty(IROperand, IROperand, String), // dest, object, property
     StoreProperty(IROperand, String, IROperand), // object, property, value
     Call(Option<IROperand>, IROperand, Vec<IROperand>), // dest_opt, callee, arguments
-    FlatVectorApply(String, String, AssignOp, IROperand, i64), // target_array, property, op, right_operand, size
+    FlatVectorApply(String, Vec<(String, AssignOp, VectorOperand)>, i64), // target_array, operations, size
     ExtractTag(IROperand, IROperand), // dest, target_struct
     ExtractPayload(IROperand, IROperand, usize),
     ConstructADT(IROperand, i64, Vec<IROperand>), // dest, choice_name, variant_name, args // dest, target_struct, payload_index
@@ -257,13 +263,24 @@ impl IRGenerator {
             Statement::Assignment(assignment) => {
                 if let Expression::Property(prop_access) = &assignment.target.node {
                     if let Expression::Primary(PrimaryExpr::Identifier(target_array)) = &prop_access.object.node {
-                        let right_val = self.generate_expression(&assignment.value);
+                        let right_val = if let Expression::Property(rhs_prop) = &assignment.value.node {
+                            if let Expression::Primary(PrimaryExpr::Identifier(rhs_arr)) = &rhs_prop.object.node {
+                                if self.array_sizes.contains_key(rhs_arr) || self.array_params.contains_key(rhs_arr) {
+                                    VectorOperand::Vector(rhs_arr.clone(), rhs_prop.property.clone())
+                                } else {
+                                    VectorOperand::Scalar(self.generate_expression(&assignment.value))
+                                }
+                            } else {
+                                VectorOperand::Scalar(self.generate_expression(&assignment.value))
+                            }
+                        } else {
+                            VectorOperand::Scalar(self.generate_expression(&assignment.value))
+                        };
+                        
                         let size = *self.array_sizes.get(target_array).unwrap_or(&0); // 100000 per precaució
                         self.emit(IRInstruction::FlatVectorApply(
                             target_array.clone(),
-                            prop_access.property.clone(),
-                            assignment.op.clone(),
-                            right_val,
+                            vec![(prop_access.property.clone(), assignment.op.clone(), right_val)],
                             size,
                         ));
                         return;
