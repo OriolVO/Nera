@@ -1,0 +1,30 @@
+// test_string_format.nera
+use std.string
+use std.io
+
+fn main() {
+    let msg1 = "Error on line: "
+    let line = 42
+    let msg2 = int_to_string(line)
+    
+    let final = concat_strings(msg1, msg2)
+    
+    // Verify length
+    let len = strlen(final)
+    // "Error on line: " is 15 chars, "42" is 2 chars. Total = 17
+    if len == 17 {
+        print(1)
+    } else {
+        print(0)
+    }
+    
+    // Verify contents via native ==
+    let expected = "Error on line: 42"
+    if final == expected {
+        print(1)
+    } else {
+        print(0)
+    }
+    
+    // Verification complete
+}
