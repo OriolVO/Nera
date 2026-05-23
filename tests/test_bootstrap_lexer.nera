@@ -1,0 +1,104 @@
+// tests/test_bootstrap_lexer.nera
+use compiler.frontend.lexer
+use std.io
+
+fn get_id(k: TokenKind) -> Int {
+    when k {
+        Data -> { return 1 }
+        Fn -> { return 2 }
+        Let -> { return 3 }
+        Mut -> { return 4 }
+        If -> { return 5 }
+        Else -> { return 6 }
+        While -> { return 7 }
+        Return -> { return 8 }
+        When -> { return 9 }
+        Break -> { return 10 }
+        Continue -> { return 11 }
+        Use -> { return 12 }
+        Extern -> { return 13 }
+        True -> { return 14 }
+        False -> { return 15 }
+        Choice -> { return 16 }
+        And -> { return 17 }
+        Or -> { return 18 }
+        Not -> { return 19 }
+        BitAnd -> { return 20 }
+        BitOr -> { return 21 }
+        BitXor -> { return 22 }
+        Shl -> { return 23 }
+        Shr -> { return 24 }
+        As -> { return 25 }
+        Identifier(s) -> { return 26 }
+        Integer(i) -> { return i } // return the exact payload!
+        Float(f) -> { return 28 }
+        StringLiteral(s) -> { return 29 }
+        CharLiteral(c) -> { return 30 }
+        Assign -> { return 31 }
+        AddAssign -> { return 32 }
+        SubAssign -> { return 33 }
+        MulAssign -> { return 34 }
+        DivAssign -> { return 35 }
+        Eq -> { return 36 }
+        NotEq -> { return 37 }
+        Lt -> { return 38 }
+        LtEq -> { return 39 }
+        Gt -> { return 40 }
+        GtEq -> { return 41 }
+        Add -> { return 42 }
+        Sub -> { return 43 }
+        Mul -> { return 44 }
+        Div -> { return 45 }
+        Mod -> { return 46 }
+        Pipe -> { return 47 }
+        Arrow -> { return 48 }
+        Caret -> { return 49 }
+        Alloc -> { return 50 }
+        Free -> { return 51 }
+        Question -> { return 52 }
+        NoneLiteral -> { return 53 }
+        LBrace -> { return 54 }
+        RBrace -> { return 55 }
+        LBracket -> { return 56 }
+        RBracket -> { return 57 }
+        LParen -> { return 58 }
+        RParen -> { return 59 }
+        Colon -> { return 60 }
+        Comma -> { return 61 }
+        Dot -> { return 62 }
+        DotDot -> { return 63 }
+        Error(s) -> { return 64 }
+        Eof -> { return 65 }
+    }
+}
+
+fn main() {
+    let source = "let x = 42 // test \n mut y = 5"
+    mut lex = alloc_lexer(source)
+    
+    // 1. let
+    let tok1 = next_token(lex)
+    if get_id(tok1^.kind) == 3 { print(1) } else { print(0) }
+    
+    // 2. x (Identifier)
+    let tok2 = next_token(lex)
+    if get_id(tok2^.kind) == 26 { print(1) } else { print(0) }
+    
+    // 3. = (Assign)
+    let tok3 = next_token(lex)
+    if get_id(tok3^.kind) == 31 { print(1) } else { print(0) }
+    
+    // 4. 42 (Integer payload!)
+    let tok4 = next_token(lex)
+    if get_id(tok4^.kind) == 42 { print(1) } else { print(0) }
+    
+    // 5. mut (after newline and comment)
+    let tok5 = next_token(lex)
+    if get_id(tok5^.kind) == 4 { print(1) } else { print(0) }
+    
+    // 6. y (Identifier)
+    let tok6 = next_token(lex)
+    if get_id(tok6^.kind) == 26 { print(1) } else { print(0) }
+    
+    free_lexer(lex)
+}

@@ -315,7 +315,9 @@ impl IRBuilder {
         let dest = self.next_reg_name();
         let _ptr_ty = match ptr.get_type() {
             LLVMType::Pointer(inner) => *inner,
-            _ => return Err(CompileError::BackendError("build_gep on non-pointer".to_string())), // Handled by outer match
+            _ => {
+                return Err(CompileError::BackendError(format!("build_gep on non-pointer. Got type: {:?}", ptr.get_type())));
+            }
         };
         // Compute return type simplified
         let ret_ty = if let LLVMType::Array(_, inner) = base_ty.clone() {

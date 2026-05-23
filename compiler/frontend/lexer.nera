@@ -1,0 +1,209 @@
+// compiler/frontend/lexer.nera
+use std.string
+
+
+choice TokenKind {
+    // Keywords
+    Data, Fn, Let, Mut,
+    
+    // Control Flow
+    If, Else, While, Return, When, Break, Continue,
+    
+    // Misc
+    Use, Extern, True, False, Choice, And, Or, Not,
+    BitAnd, BitOr, BitXor, Shl, Shr, As,
+    
+    // Literals
+    Identifier(String),
+    Integer(Int),
+    Float(Float),
+    StringLiteral(String),
+    CharLiteral(Char),
+    
+    // Operators
+    Assign, AddAssign, SubAssign, MulAssign, DivAssign,
+    Eq, NotEq, Lt, LtEq, Gt, GtEq,
+    Add, Sub, Mul, Div, Mod, Pipe, Arrow, Caret,
+    Alloc, Free, Question, NoneLiteral,
+    
+    // Delimiters
+    LBrace, RBrace, LBracket, RBracket, LParen, RParen,
+    Colon, Comma, Dot, DotDot,
+    
+    Error(String),
+    Eof
+}
+
+data Token {
+    kind: TokenKind
+    line: Int
+    col: Int
+}
+
+data Lexer {
+    source: String
+    pos: Int
+    len: Int
+    line: Int
+    col: Int
+}
+
+fn alloc_lexer(src: String) -> ^Lexer {
+    mut lex = alloc Lexer()
+    lex^.source = src
+    lex^.pos = 0
+    lex^.len = strlen(src)
+    lex^.line = 1
+    lex^.col = 1
+    return lex
+}
+
+fn free_lexer(lex: ^Lexer) -> Void {
+    free lex
+}
+
+fn is_at_end(lex: ^Lexer) -> Boolean {
+    return lex^.pos >= lex^.len
+}
+
+fn peek(lex: ^Lexer) -> Char {
+    if is_at_end(lex) {
+        return '\0'
+    }
+    return lex^.source[lex^.pos]
+}
+
+fn peek_next(lex: ^Lexer) -> Char {
+    if lex^.pos + 1 >= lex^.len {
+        return '\0'
+    }
+    return lex^.source[lex^.pos + 1]
+}
+
+fn advance(mut lex: ^Lexer) -> Char {
+    let c = peek(lex)
+    lex^.pos = lex^.pos + 1
+    if c == '\n' {
+        lex^.line = lex^.line + 1
+        lex^.col = 1
+    } else {
+        lex^.col = lex^.col + 1
+    }
+    return c
+}
+
+fn is_whitespace(c: Char) -> Boolean {
+    return c == ' ' or c == '\r' or c == '\t' or c == '\n'
+}
+
+fn is_alpha(c: Char) -> Boolean {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_'
+}
+
+fn is_digit(c: Char) -> Boolean {
+    return c >= '0' and c <= '9'
+}
+
+fn is_alphanumeric(c: Char) -> Boolean {
+    return is_alpha(c) or is_digit(c)
+}
+
+fn skip_whitespace(mut lex: ^Lexer) -> Void {
+    while not is_at_end(lex) {
+        let c = peek(lex)
+        if is_whitespace(c) {
+            advance(lex)
+        } else if c == '/' and peek_next(lex) == '/' {
+            while not is_at_end(lex) and peek(lex) != '\n' {
+                advance(lex)
+            }
+        } else if c == '/' and peek_next(lex) == '*' {
+            advance(lex) // skip /
+            advance(lex) // skip *
+            while not is_at_end(lex) {
+                if peek(lex) == '*' and peek_next(lex) == '/' {
+                    advance(lex) // skip *
+                    advance(lex) // skip /
+                    break
+                }
+                advance(lex)
+            }
+        } else {
+            break
+        }
+    }
+}
+
+fn make_token(kind: TokenKind, line: Int, col: Int) -> ^Token {
+    mut tok = alloc Token()
+    tok^.kind = kind
+    tok^.line = line
+    tok^.col = col
+    return tok
+}
+
+// Minimal implementation to test compilation
+fn next_token(mut lex: ^Lexer) -> ^Token {
+    skip_whitespace(lex)
+    
+    let start_line = lex^.line
+    let start_col = lex^.col
+    
+    if is_at_end(lex) {
+        return make_token(TokenKind.Eof, start_line, start_col)
+    }
+    
+    let c = advance(lex)
+    
+    if c == '+' { return make_token(TokenKind.Add, start_line, start_col) }
+    if c == '-' {
+        if peek(lex) == '>' {
+            advance(lex)
+            return make_token(TokenKind.Arrow, start_line, start_col)
+        }
+        return make_token(TokenKind.Sub, start_line, start_col)
+    }
+    if c == '=' {
+        if peek(lex) == '=' {
+            advance(lex)
+            return make_token(TokenKind.Eq, start_line, start_col)
+        }
+        return make_token(TokenKind.Assign, start_line, start_col)
+    }
+    
+    if is_alpha(c) {
+        // Collect identifier
+        let start_pos = lex^.pos - 1
+        while is_alphanumeric(peek(lex)) {
+            advance(lex)
+        }
+        let len = lex^.pos - start_pos
+        let ident = lex^.source[start_pos..lex^.pos]
+        
+        // Check keywords
+        if ident == "let" { return make_token(TokenKind.Let, start_line, start_col) }
+        if ident == "mut" { return make_token(TokenKind.Mut, start_line, start_col) }
+        if ident == "fn" { return make_token(TokenKind.Fn, start_line, start_col) }
+        if ident == "if" { return make_token(TokenKind.If, start_line, start_col) }
+        if ident == "else" { return make_token(TokenKind.Else, start_line, start_col) }
+        if ident == "while" { return make_token(TokenKind.While, start_line, start_col) }
+        if ident == "return" { return make_token(TokenKind.Return, start_line, start_col) }
+        
+        return make_token(TokenKind.Identifier(ident), start_line, start_col)
+    }
+    
+    if is_digit(c) {
+        // Collect integer
+        let start_pos = lex^.pos - 1
+        mut val = (c as Int) - ('0' as Int)
+        
+        while is_digit(peek(lex)) {
+            let next_c = advance(lex)
+            val = val * 10 + ((next_c as Int) - ('0' as Int))
+        }
+        
+        return make_token(TokenKind.Integer(val), start_line, start_col)
+    }
+    
+    return make_token(TokenKind.Error("Unexpected character"), start_line, start_col)
+}

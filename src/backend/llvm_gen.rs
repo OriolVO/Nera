@@ -14,6 +14,7 @@ pub struct LLVMGenerator {
     scalar_vars: std::collections::HashSet<String>,
     main_arena_ptr: Option<LLVMValue>,
     shared_vec_idx: Option<LLVMValue>,
+    func_ret_types: HashMap<String, LLVMType>,
 }
 
 impl LLVMGenerator {
@@ -26,6 +27,7 @@ impl LLVMGenerator {
             scalar_vars: std::collections::HashSet::new(),
             main_arena_ptr: None,
             shared_vec_idx: None,
+            func_ret_types: HashMap::new(),
         }
     }
 
@@ -58,8 +60,40 @@ impl LLVMGenerator {
                 }
             }
             TypeInfo::Void => LLVMType::Void,
+            TypeInfo::Custom(_) => LLVMType::Pointer(Box::new(LLVMType::I64)), // data/choice are heap-allocated
+            TypeInfo::Nullable(inner) => {
+                let inner_llvm = self.type_to_llvm(inner);
+                // Nullable pointers are still pointers; nullable primitives use i64 (0 = None)
+                if matches!(inner_llvm, LLVMType::Pointer(_)) {
+                    inner_llvm
+                } else {
+                    LLVMType::I64
+                }
+            }
+            TypeInfo::None => LLVMType::Pointer(Box::new(LLVMType::I8)), // null pointer
             _ => LLVMType::I64,
         }
+    }
+
+    fn return_type_str_to_llvm(&self, ret_type_str: &str) -> LLVMType {
+        let mut s = ret_type_str;
+        let is_nullable = s.starts_with('?');
+        if is_nullable { s = &s[1..]; }
+        let is_ptr = s.starts_with('^');
+        if is_ptr { s = &s[1..]; }
+        
+        let mut ret_info = match s {
+            "Int" => TypeInfo::Int,
+            "Float" => TypeInfo::Float,
+            "Boolean" => TypeInfo::Boolean,
+            "String" => TypeInfo::String,
+            "Char" => TypeInfo::Int, // Char is i64 at LLVM level
+            "Void" => TypeInfo::Void,
+            _ => TypeInfo::Custom(s.to_string()),
+        };
+        if is_ptr { ret_info = TypeInfo::Pointer(Box::new(ret_info)); }
+        if is_nullable { ret_info = TypeInfo::Nullable(Box::new(ret_info)); }
+        self.type_to_llvm(&ret_info)
     }
 
     pub fn generate(&mut self, optimized_ir: &OptimizedIR, type_env: HashMap<String, TypeInfo>) -> Result<String, CompileError> {
@@ -150,6 +184,15 @@ impl LLVMGenerator {
         self.builder.declare("declare i8* @strncpy(i8*, i8*, i64)");
         self.builder.declare("declare i32 @strcmp(i8*, i8*)");
 
+        // Pre-populate func_ret_types from all functions
+        self.func_ret_types.clear();
+        for func in &optimized_ir.functions {
+            let sanitized = func.name.replace("(", "_").replace(")", "").replace(", ", "_");
+            let name = if func.name == "main" { "nera_main".to_string() } else { sanitized };
+            let ret_ty = self.return_type_str_to_llvm(&func.return_type);
+            self.func_ret_types.insert(name, ret_ty);
+        }
+
         for func in &optimized_ir.functions {
             self.lower_function(func, &actual_soa_arrays)?;
         }
@@ -164,23 +207,7 @@ impl LLVMGenerator {
 
     fn lower_function(&mut self, func: &IRFunction, soa_arrays: &Vec<(String, i64)>) -> Result<(), CompileError> {
 
-        let mut ret_info_str = func.return_type.as_str();
-        let is_nullable = ret_info_str.starts_with('?');
-        if is_nullable { ret_info_str = &ret_info_str[1..]; }
-        let is_ptr = ret_info_str.starts_with('^');
-        if is_ptr { ret_info_str = &ret_info_str[1..]; }
-        
-        let mut ret_info = match ret_info_str {
-            "Int" => TypeInfo::Int,
-            "Float" => TypeInfo::Float,
-            "Boolean" => TypeInfo::Boolean,
-            "String" => TypeInfo::String,
-            "Void" => TypeInfo::Void,
-            _ => TypeInfo::Custom(ret_info_str.to_string()),
-        };
-        if is_ptr { ret_info = TypeInfo::Pointer(Box::new(ret_info)); }
-        if is_nullable { ret_info = TypeInfo::Nullable(Box::new(ret_info)); }
-        let mut ret_ty = self.type_to_llvm(&ret_info);
+        let mut ret_ty = self.return_type_str_to_llvm(&func.return_type);
         if func.name == "main" {
             ret_ty = LLVMType::I32;
         }
@@ -514,7 +541,13 @@ impl LLVMGenerator {
                     let gep = self.builder.build_gep(target_llvm_ty, ptr_val, vec![offset_val]).unwrap();
                     self.builder.build_store(val_val, gep, None);
                 } else {
-                    let ret_ty = if dest_opt.is_some() { LLVMType::I64 } else { LLVMType::Void };
+                    let ret_ty = if dest_opt.is_none() {
+                        LLVMType::Void
+                    } else if let Some(known_ty) = self.func_ret_types.get(&callee_str) {
+                        known_ty.clone()
+                    } else {
+                        LLVMType::I64 // fallback for unknown/runtime functions
+                    };
                     let res = self.builder.build_call(ret_ty, &callee_str, arg_vals);
                     if let Some(IROperand::TempReg(t)) = dest_opt {
                         self.temp_map.insert(*t, res);
@@ -588,13 +621,7 @@ impl LLVMGenerator {
                 let casted_i64_ptr = self.builder.build_bitcast(ptr_val, LLVMType::Pointer(Box::new(LLVMType::I64)));
                 let element_ptr = self.builder.build_gep(LLVMType::I64, casted_i64_ptr, vec![LLVMValue::ConstI64(*index as i64)])?;
                 
-                // Need to parse type_name to LLVMType
-                // Temporary simplified parser, assuming it matches Nera's types
-                let field_llvm_ty = if type_name == "Int" { LLVMType::I64 }
-                else if type_name == "Float" { LLVMType::Double }
-                else if type_name == "Boolean" { LLVMType::I1 }
-                else if type_name.starts_with('^') { LLVMType::Pointer(Box::new(LLVMType::I64)) } // simplify
-                else { LLVMType::I64 };
+                let field_llvm_ty = self.str_to_llvm_type(type_name);
 
                 let target_ptr = self.builder.build_bitcast(element_ptr, LLVMType::Pointer(Box::new(field_llvm_ty)));
                 let loaded = self.builder.build_load(target_ptr, Some(8))?;
