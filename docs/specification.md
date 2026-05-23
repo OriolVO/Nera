@@ -87,3 +87,21 @@ To work with dynamic collections, developers can leverage functions designed for
 - `list_free(list)`
 
 Under the hood, `List(T)` allocations natively use standard C memory management (e.g., `malloc` and `free`). Dynamic bounds checking and transparent vector reallocation guarantee safe access. Explicit instantiations resolve `T` sequentially, stripping out any pointer (`^`) or nullable (`?`) wrappers dynamically to align to base scalar types, matching C-API level structs cleanly.
+
+## 6. Unary Operators
+Nera supports explicit unary operators for arithmetic and logical negation. Unary operators act as prefix operators and evaluate before postfix expressions.
+
+### 6.1 Arithmetic Negation (`-`)
+The `-` operator negates numeric expressions (`Int` and `Float`).
+```nera
+let x = -5
+let y = -(10 + 20)
+```
+
+### 6.2 Logical NOT (`not`)
+The `not` operator negates boolean expressions. Nera uses English keyword-based logical operators (`and`, `or`, `not`) to enforce readability and consistency.
+```nera
+if not is_far and has_mana {
+    // ...
+}
+```

@@ -106,6 +106,7 @@ pub enum LLVMInstruction {
     FCmp(String, String, LLVMType, LLVMValue, LLVMValue),
     And(String, LLVMType, LLVMValue, LLVMValue),
     Or(String, LLVMType, LLVMValue, LLVMValue),
+    Xor(String, LLVMType, LLVMValue, LLVMValue),
     ZExt(String, LLVMType, LLVMValue, LLVMType), // dest, dest_ty, val, src_ty
     Trunc(String, LLVMType, LLVMValue, LLVMType),
     BitCast(String, LLVMType, LLVMValue, LLVMType),
@@ -149,6 +150,7 @@ impl LLVMInstruction {
             LLVMInstruction::FCmp(dest, pred, ty, l, r) => format!("  %{} = fcmp {} {} {}, {}", dest, pred, ty.to_string(), l.to_string(), r.to_string()),
             LLVMInstruction::And(dest, ty, l, r) => format!("  %{} = and {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
             LLVMInstruction::Or(dest, ty, l, r) => format!("  %{} = or {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
+            LLVMInstruction::Xor(dest, ty, l, r) => format!("  %{} = xor {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
             LLVMInstruction::ZExt(dest, dest_ty, val, _src_ty) => format!("  %{} = zext {} to {}", dest, val.typed_string(), dest_ty.to_string()),
             LLVMInstruction::Trunc(dest, dest_ty, val, _src_ty) => format!("  %{} = trunc {} to {}", dest, val.typed_string(), dest_ty.to_string()),
             LLVMInstruction::BitCast(dest, dest_ty, val, _src_ty) => format!("  %{} = bitcast {} to {}", dest, val.typed_string(), dest_ty.to_string()),
@@ -407,6 +409,18 @@ impl IRBuilder {
         let ty = l.get_type();
         self.push_instr(LLVMInstruction::Or(dest.clone(), ty.clone(), l, r));
         LLVMValue::Reg(dest, ty)
+    }
+
+    pub fn build_xor(&mut self, l: LLVMValue, r: LLVMValue) -> LLVMValue {
+        let dest = self.next_reg_name();
+        let ty = l.get_type();
+        self.push_instr(LLVMInstruction::Xor(dest.clone(), ty.clone(), l, r));
+        LLVMValue::Reg(dest, ty)
+    }
+
+    pub fn build_fneg(&mut self, val: LLVMValue) -> LLVMValue {
+        let zero = LLVMValue::ConstDouble(0.0);
+        self.build_fsub(zero, val)
     }
 
     pub fn build_zext(&mut self, val: LLVMValue, dest_ty: LLVMType) -> LLVMValue {

@@ -1,0 +1,39 @@
+// test_unary.nera
+use std.io
+
+fn main() {
+    let a = 10
+    let b = -a
+    let c = -(-5)
+    
+    let is_true = true
+    let is_false = not is_true
+    let also_true = not not is_true
+
+    let f = 3.14
+    let neg_f = -f
+
+    if b == -10 {
+        print(1)
+    } else {
+        print(0)
+    }
+
+    if c == 5 {
+        print(1)
+    } else {
+        print(0)
+    }
+
+    if is_false == false {
+        print(1)
+    } else {
+        print(0)
+    }
+
+    if also_true == true {
+        print(1)
+    } else {
+        print(0)
+    }
+}

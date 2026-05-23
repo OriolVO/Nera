@@ -66,8 +66,9 @@ LogicalExpr     ::= EqualityExpr (("and" | "or") EqualityExpr)*
 EqualityExpr    ::= RelationalExpr (("==" | "!=") RelationalExpr)*
 RelationalExpr  ::= AdditiveExpr (("<" | "<=" | ">" | ">=") AdditiveExpr)*
 AdditiveExpr    ::= MultiplicativeExpr (("+" | "-") MultiplicativeExpr)*
-MultiplicativeExpr ::= PostfixExpr (("*" | "/") PostfixExpr)*
+MultiplicativeExpr ::= UnaryExpr (("*" | "/") UnaryExpr)*
 
+UnaryExpr       ::= ("-" | "not")* PostfixExpr
 /* Postfix operators (left-associative, chained in a loop):
      expr.field          – field / property access
      expr.method(args)   – method-style call (desugared to free fn call in sema)

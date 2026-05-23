@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::frontend::sema::TypeInfo;
-use crate::frontend::ast::{AssignOp, BinaryOp};
+use crate::frontend::ast::{AssignOp, BinaryOp, UnaryOp};
 use crate::error::CompileError;
 use crate::midend::ir::{IRInstruction, IROperand, IRFunction, Terminator, VectorOperand};
 use crate::midend::optimizer::OptimizedIR;
@@ -361,6 +361,31 @@ impl LLVMGenerator {
                     }
                 } else if let IROperand::TempReg(t) = dest {
                     self.temp_map.insert(*t, src_val);
+                }
+            }
+            IRInstruction::UnaryOp(dest, op, operand) => {
+                let op_val = self.operand_to_value(operand)?;
+                let is_float = op_val.get_type() == LLVMType::Double;
+                
+                let res = match op {
+                    UnaryOp::Negate => {
+                        if is_float {
+                            self.builder.build_fneg(op_val)
+                        } else {
+                            let zero = LLVMValue::ConstI64(0);
+                            self.builder.build_sub(zero, op_val)
+                        }
+                    }
+                    UnaryOp::Not => {
+                        // true is 1 (i1), false is 0 (i1)
+                        // xor with 1 flips the bit
+                        let one = LLVMValue::ConstI1(true); // the builder will bitcast it to i1 if needed or just use i1 literal
+                        self.builder.build_xor(op_val, one)
+                    }
+                };
+                
+                if let IROperand::TempReg(t) = dest {
+                    self.temp_map.insert(*t, res);
                 }
             }
             IRInstruction::BinaryOp(dest, op, left, right) => {

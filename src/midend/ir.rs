@@ -1,4 +1,4 @@
-use crate::frontend::ast::{AssignOp, BinaryOp, Block, Declaration, Expression, PrimaryExpr, Program, Statement, ElseBranch};
+use crate::frontend::ast::{AssignOp, BinaryOp, UnaryOp, Block, Declaration, Expression, PrimaryExpr, Program, Statement, ElseBranch};
 use crate::frontend::diagnostics::Spanned;
 use std::collections::HashMap;
 use crate::error::CompileError;
@@ -49,6 +49,7 @@ pub enum VectorOperand {
 #[derive(Debug, Clone, PartialEq)]
 pub enum IRInstruction {
     Assign(IROperand, IROperand), // dest, src
+    UnaryOp(IROperand, UnaryOp, IROperand), // dest, op, operand
     BinaryOp(IROperand, BinaryOp, IROperand, IROperand), // dest, op, left, right
     LoadProperty(IROperand, IROperand, String), // dest, object, property
     StoreProperty(IROperand, String, IROperand), // object, property, value
@@ -508,6 +509,16 @@ impl IRGenerator {
                     bin_expr.op.clone(),
                     left,
                     right,
+                ));
+                dest
+            }
+            Expression::Unary(unary_expr) => {
+                let operand = self.generate_expression(&unary_expr.operand);
+                let dest = self.new_temp();
+                self.emit(IRInstruction::UnaryOp(
+                    dest.clone(),
+                    unary_expr.op.clone(),
+                    operand,
                 ));
                 dest
             }

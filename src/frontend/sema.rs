@@ -423,6 +423,7 @@ impl<'a> SemanticAnalyzer<'a> {
 
     fn substitute_type_in_expr(&mut self, expr: &mut Expression, subs: &HashMap<String, Type>) {
         match expr {
+            Expression::Unary(u) => self.substitute_type_in_expr(&mut u.operand.node, subs),
             Expression::Binary(b) => {
                 self.substitute_type_in_expr(&mut b.left.node, subs);
                 self.substitute_type_in_expr(&mut b.right.node, subs);
@@ -818,8 +819,13 @@ impl<'a> SemanticAnalyzer<'a> {
                         }
                         ElseBranch::Block(b) => {
                             self.env.enter_scope();
-                            let mut spanned_b = Spanned::new(b.clone(), else_branch.span.clone());
-                            self.analyze_block(&mut spanned_b);
+                            // Temporarily move the block's statements into a Spanned wrapper,
+                            // analyze (which mutates in place), then move back.
+                            let block_span = else_branch.span.clone();
+                            let stmts: Vec<Spanned<Statement>> = b.statements.drain(..).collect();
+                            let mut temp_block = Spanned::new(Block { statements: stmts }, block_span);
+                            self.analyze_block(&mut temp_block);
+                            b.statements = temp_block.node.statements;
                             self.env.exit_scope();
                         }
                     }
@@ -1115,6 +1121,23 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
                 
                 TypeInfo::Unknown
+            }
+            Expression::Unary(unary_expr) => {
+                let operand_ty = self.analyze_expression(&mut unary_expr.operand);
+                match unary_expr.op {
+                    UnaryOp::Negate => {
+                        if operand_ty != TypeInfo::Int && operand_ty != TypeInfo::Float && operand_ty != TypeInfo::Unknown {
+                            self.report_error(&unary_expr.operand.span, &format!("Cannot negate type {}", operand_ty.to_string()));
+                        }
+                        operand_ty
+                    }
+                    UnaryOp::Not => {
+                        if operand_ty != TypeInfo::Boolean && operand_ty != TypeInfo::Unknown {
+                            self.report_error(&unary_expr.operand.span, &format!("Expected Boolean for 'not', found {}", operand_ty.to_string()));
+                        }
+                        TypeInfo::Boolean
+                    }
+                }
             }
             Expression::Binary(bin_expr) => {
                 let left_ty = self.analyze_expression(&mut bin_expr.left);

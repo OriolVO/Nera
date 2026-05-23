@@ -199,6 +199,7 @@ pub struct ReturnStmt {
 /// An expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
+    Unary(Box<UnaryExpr>),
     Binary(Box<BinaryExpr>),
     Property(Box<PropertyAccess>),
     Call(Box<FunctionCall>),
@@ -245,6 +246,20 @@ pub struct BinaryExpr {
     pub left: Spanned<Expression>,
     pub op: BinaryOp,
     pub right: Spanned<Expression>,
+}
+
+/// A unary expression (prefix operations like - and not).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnaryExpr {
+    pub op: UnaryOp,
+    pub operand: Spanned<Expression>,
+}
+
+/// Unary operators.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnaryOp {
+    Negate, // -
+    Not,    // not
 }
 
 /// Binary operators.

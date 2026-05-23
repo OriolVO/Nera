@@ -20,6 +20,7 @@ pub enum TokenKind {
     When,
     And,
     Or,
+    Not,
 
     Identifier(String),
     Integer(i64),
@@ -167,6 +168,7 @@ impl<'a> Lexer<'a> {
             "None" => TokenKind::NoneLiteral,
             "and" => TokenKind::And,
             "or" => TokenKind::Or,
+            "not" => TokenKind::Not,
             _ => TokenKind::Identifier(ident),
         }
     }

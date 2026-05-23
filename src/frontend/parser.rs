@@ -748,7 +748,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_multiplicative_expr(&mut self) -> Option<Spanned<Expression>> {
-        let mut left = self.parse_postfix_expr()?;
+        let mut left = self.parse_unary_expr()?;
 
         while self.current_token.kind == TokenKind::Mul || self.current_token.kind == TokenKind::Div {
             let op = match self.current_token.kind {
@@ -757,7 +757,7 @@ impl<'a> Parser<'a> {
                 _ => unreachable!(),
             };
             self.advance();
-            let right = self.parse_postfix_expr()?;
+            let right = self.parse_unary_expr()?;
             let span = left.span.merge(&right.span);
             left = Spanned::new(Expression::Binary(Box::new(BinaryExpr {
                 left,
@@ -767,6 +767,26 @@ impl<'a> Parser<'a> {
         }
 
         Some(left)
+    }
+
+    fn parse_unary_expr(&mut self) -> Option<Spanned<Expression>> {
+        if self.current_token.kind == TokenKind::Sub || self.current_token.kind == TokenKind::Not {
+            let start_span = self.current_token.span.clone();
+            let op = match self.current_token.kind {
+                TokenKind::Sub => UnaryOp::Negate,
+                TokenKind::Not => UnaryOp::Not,
+                _ => unreachable!(),
+            };
+            self.advance();
+            let operand = self.parse_unary_expr()?; // allow nested unary ops
+            let span = start_span.merge(&operand.span);
+            return Some(Spanned::new(Expression::Unary(Box::new(UnaryExpr {
+                op,
+                operand,
+            })), span));
+        }
+
+        self.parse_postfix_expr()
     }
 
     fn parse_postfix_expr(&mut self) -> Option<Spanned<Expression>> {
