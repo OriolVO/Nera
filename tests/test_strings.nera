@@ -1,3 +1,4 @@
+
 fn print_string(s: String) -> Void {
     // dummy use
 }

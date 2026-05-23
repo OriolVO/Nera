@@ -1,3 +1,4 @@
+use std.io
 // Test 13: Using the 'when' pattern matching syntax
 // This file demonstrates the syntax for both ADTs and Nullables.
 

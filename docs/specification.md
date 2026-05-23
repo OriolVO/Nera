@@ -71,5 +71,19 @@ fn max(a: Int, b: Int) -> Int {
 fn min(a: Int, b: Int) -> Int {
     if a < b { return a }
     return b
-}
 ```
+
+## 5. Generics and Collections
+### 5.1 Generics Infrastructure
+Nera supports robust monomorphization of generic data structures and functions, utilizing a syntax like `List(T)`. During semantic analysis, generic usages are expanded into concrete implementations based on their type parameters (e.g. `List(Int)` or `List(Float)`). This approach allows identical logic to seamlessly integrate into Nera's memory-safe, data-oriented architectural backend without sacrificing Type Safety.
+When instantiating generic entities, type annotations are explicitly provided to remove ambiguity, particularly for `extern fn` or `data` structures.
+
+### 5.2 Dynamic Collections: `List(T)`
+The core implementation of dynamic arrays in Nera is `List(T)`, which combines a backing buffer pointer alongside state trackers for current `length` and `capacity`.
+To work with dynamic collections, developers can leverage functions designed for standard generic interaction:
+- `new_list(capacity, dummy_item)`
+- `list_push(list, item)`
+- `list_get(list, index)`
+- `list_free(list)`
+
+Under the hood, `List(T)` allocations natively use standard C memory management (e.g., `malloc` and `free`). Dynamic bounds checking and transparent vector reallocation guarantee safe access. Explicit instantiations resolve `T` sequentially, stripping out any pointer (`^`) or nullable (`?`) wrappers dynamically to align to base scalar types, matching C-API level structs cleanly.

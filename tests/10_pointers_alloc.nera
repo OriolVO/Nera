@@ -1,3 +1,4 @@
+use std.io
 fn main() {
     mut p1: ^Int = alloc Int()
     p1^ = 42

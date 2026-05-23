@@ -1,3 +1,4 @@
+use std.io
 use std.math
 
 data Particle {
@@ -26,6 +27,8 @@ fn main() {
     }
     
     // 6. Prints sobrecarregats segons el tipus detectat
-    print(p.x)    // Hauria d'imprimir 13.000000 en format Float (%f)
-    print(is_far) // Hauria d'imprimir 1 en format Boolean/Int (%ld)
+    print_float(p.x[0])    // Hauria d'imprimir 13.000000 en format Float (%f)
+    mut far_int = 0
+    if is_far { far_int = 1 }
+    print(far_int) // Hauria d'imprimir 1 en format Boolean/Int (%ld)
 }

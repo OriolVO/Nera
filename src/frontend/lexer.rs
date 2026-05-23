@@ -81,6 +81,7 @@ impl Token {
 }
 
 /// The lexer is responsible for converting a stream of characters into a stream of tokens.
+#[derive(Clone)]
 pub struct Lexer<'a> {
     input: std::iter::Peekable<std::str::Chars<'a>>,
     line: usize,

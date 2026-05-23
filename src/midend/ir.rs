@@ -1,4 +1,4 @@
-use crate::frontend::ast::{AssignOp, BinaryOp, Block, Declaration, Expression, IfStmt, PrimaryExpr, Program, Statement, WhileStmt, ElseBranch};
+use crate::frontend::ast::{AssignOp, BinaryOp, Block, Declaration, Expression, PrimaryExpr, Program, Statement, ElseBranch};
 use crate::frontend::diagnostics::Spanned;
 use std::collections::HashMap;
 use crate::error::CompileError;
@@ -57,7 +57,7 @@ pub enum IRInstruction {
     ExtractTag(IROperand, IROperand), // dest, target_struct
     ExtractPayload(IROperand, IROperand, usize),
     ConstructADT(IROperand, i64, Vec<IROperand>), // dest, choice_name, variant_name, args // dest, target_struct, payload_index
-    Alloc(IROperand, String), // dest, type_name
+    Alloc(IROperand, String, usize), // dest, type_name, size
     Free(IROperand), // target_ptr
     LoadPointer(IROperand, IROperand), // dest, source_ptr
     StorePointer(IROperand, IROperand), // dest_ptr, source_val
@@ -170,7 +170,7 @@ impl IRGenerator {
                 self.label_count = 0;
 
                 let return_type = if let Some(ty) = &fn_decl.return_type {
-                    ty.node.name.clone()
+                    ty.node.to_string()
                 } else {
                     "Void".to_string()
                 };
@@ -220,7 +220,7 @@ impl IRGenerator {
             }
             Declaration::Extern(extern_decl) => {
                 let return_type = if let Some(ty) = &extern_decl.return_type {
-                    ty.node.name.clone()
+                    ty.node.to_string()
                 } else {
                     "Void".to_string()
                 };
@@ -571,7 +571,21 @@ impl IRGenerator {
             }
             Expression::Alloc(alloc_expr) => {
                 let dest = self.new_temp();
-                self.emit(IRInstruction::Alloc(dest.clone(), alloc_expr.ty.node.name.clone()));
+                let ty_name = alloc_expr.ty.node.name.clone();
+                let mut size_in_bytes = 8;
+                let base_name = ty_name.split('(').next().unwrap_or(&ty_name).to_string();
+                
+                for (key, fields) in &self.data_structs {
+                    if key == &base_name || key.starts_with(&format!("{}(", base_name)) {
+                        size_in_bytes = (fields.len() as i64) * 8;
+                        if size_in_bytes == 0 {
+                            size_in_bytes = 8;
+                        }
+                        break;
+                    }
+                }
+                
+                self.emit(IRInstruction::Alloc(dest.clone(), ty_name, size_in_bytes as usize));
                 dest
             }
             Expression::Deref(inner_expr) => {

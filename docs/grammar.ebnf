@@ -10,20 +10,20 @@ Declaration     ::= DataDecl | ChoiceDecl | FnDecl | ExternDecl | VarDecl
 
 /* --- DATA STRUCTURES --- */
 
-DataDecl        ::= "data" Identifier "{" FieldDecl* "}"
+DataDecl        ::= "data" Identifier ("(" Identifier ("," Identifier)* ")")? "{" FieldDecl* "}"
 FieldDecl       ::= Identifier ":" Type
 
 
 /* --- ALGEBRAIC DATA TYPES --- */
 
-ChoiceDecl      ::= "choice" Identifier "{" (VariantDecl ","?)* "}"
+ChoiceDecl      ::= "choice" Identifier ("(" Identifier ("," Identifier)* ")")? "{" (VariantDecl ","?)* "}"
 VariantDecl     ::= Identifier ("(" Type ("," Type)* ")")?
 
 
 /* --- FUNCTIONS & FFI --- */
 
-ExternDecl      ::= "extern" "fn" Identifier "(" ParamList? ")" ("->" Type)?
-FnDecl          ::= "fn" Identifier "(" ParamList? ")" ("->" Type)? Block
+ExternDecl      ::= "extern" "fn" Identifier ("(" Identifier ("," Identifier)* ")")? "(" ParamList? ")" ("->" Type)?
+FnDecl          ::= "fn" Identifier ("(" Identifier ("," Identifier)* ")")? "(" ParamList? ")" ("->" Type)? Block
 ParamList       ::= Param ("," Param)*
 Param           ::= "mut"? Identifier ":" Type
 
@@ -33,8 +33,9 @@ Param           ::= "mut"? Identifier ":" Type
    ?T         = nullable T (None | T); zero-overhead null pointer for pointers
    T[N]       = fixed-length array of N elements of type T
    T[]        = dynamically-sized array (slice) of T
+   T(U, V)    = generic type instantiation
 */
-Type            ::= "?"? "^"? Identifier ("[" Integer? "]")?
+Type            ::= "?"? "^"? Identifier ("(" Type ("," Type)* ")")? ("[" Integer? "]")?
 
 
 /* --- BLOCKS & STATEMENTS --- */

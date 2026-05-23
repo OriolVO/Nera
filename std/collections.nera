@@ -1,0 +1,66 @@
+// Nera Standard Collections Library
+
+extern fn alloc_array(T)(capacity: Int, dummy: ^T) -> ^T
+extern fn free_array(T)(ptr: ^T) -> Void
+extern fn ptr_write(T)(ptr: ^T, offset: Int, val: T)
+extern fn ptr_read(T)(ptr: ^T, offset: Int) -> T
+
+data List(T) {
+    capacity: Int
+    length: Int
+    buffer: ^T
+}
+
+fn new_list(T)(capacity: Int, dummy: ^T) -> ^List(T) {
+    mut list = alloc List(T)()
+    list^.capacity = capacity
+    list^.length = 0
+    if capacity > 0 {
+        list^.buffer = alloc_array(capacity, list^.buffer)
+    }
+    return list
+}
+
+fn list_push(T)(mut list: ^List(T), item: T) {
+    if list^.length == list^.capacity {
+        mut new_capacity = list^.capacity * 2
+        if list^.capacity == 0 {
+            new_capacity = 8
+        }
+        let new_buffer = alloc_array(new_capacity, list^.buffer)
+        
+        // Copy elements
+        mut i = 0
+        while i < list^.length {
+            let old_item = ptr_read(list^.buffer, i)
+            ptr_write(new_buffer, i, old_item)
+            i = i + 1
+        }
+        
+        if list^.capacity > 0 {
+            free_array(list^.buffer)
+        }
+        
+        list^.buffer = new_buffer
+        list^.capacity = new_capacity
+    }
+    
+    ptr_write(list^.buffer, list^.length, item)
+    list^.length = list^.length + 1
+}
+
+fn list_get(T)(list: ^List(T), index: Int) -> T {
+    // Note: Assuming index < list^.length. We could add a panic here if we had one.
+    return ptr_read(list^.buffer, index)
+}
+
+fn list_set(T)(list: ^List(T), index: Int, item: T) {
+    ptr_write(list^.buffer, index, item)
+}
+
+fn list_free(T)(list: ^List(T)) {
+    if list^.capacity > 0 {
+        free_array(list^.buffer)
+    }
+    // We don't have free for objects yet, so we just leak the List wrapper for now!
+}

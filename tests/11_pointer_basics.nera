@@ -1,3 +1,4 @@
+use std.io
 // Tests pointer chaining and struct pointer allocations 
 // Note: Struct pointer property accesses are not fully implemented in the LLVM backend yet,
 // so this primarily tests the semantic analysis and AST representation.

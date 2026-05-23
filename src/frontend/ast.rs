@@ -27,6 +27,7 @@ pub enum Declaration {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataDecl {
     pub name: String,
+    pub generic_params: Vec<String>,
     pub fields: Vec<FieldDecl>,
 }
 
@@ -42,6 +43,7 @@ pub struct FieldDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChoiceDecl {
     pub name: String,
+    pub generic_params: Vec<String>,
     pub variants: Vec<VariantDecl>,
 }
 
@@ -56,6 +58,7 @@ pub struct VariantDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
     pub name: String,
+    pub generic_params: Vec<String>,
     pub params: Vec<Param>,
     pub return_type: Option<Spanned<Type>>,
     pub body: Spanned<Block>,
@@ -65,6 +68,7 @@ pub struct FnDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternDecl {
     pub name: String,
+    pub generic_params: Vec<String>,
     pub params: Vec<Param>,
     pub return_type: Option<Spanned<Type>>,
 }
@@ -81,10 +85,35 @@ pub struct Param {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Type {
     pub name: String,
+    pub generic_args: Vec<Spanned<Type>>,
     pub is_array: bool,
     pub array_size: Option<i64>, // Only relevant if is_array is true. None means dynamic [].
     pub is_ptr: bool,
     pub is_nullable: bool,
+}
+
+impl Type {
+    pub fn to_string(&self) -> String {
+        let mut base = self.name.clone();
+        if !self.generic_args.is_empty() {
+            let args: Vec<String> = self.generic_args.iter().map(|arg| arg.node.to_string()).collect();
+            base.push_str(&format!("({})", args.join(", ")));
+        }
+        if self.is_ptr {
+            base = format!("^{}", base);
+        }
+        if self.is_array {
+            if let Some(size) = self.array_size {
+                base = format!("{}[{}]", base, size);
+            } else {
+                base = format!("{}[]", base);
+            }
+        }
+        if self.is_nullable {
+            base = format!("?{}", base);
+        }
+        base
+    }
 }
 
 /// A block of statements enclosed in curly braces.

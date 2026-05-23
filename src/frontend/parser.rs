@@ -3,12 +3,14 @@ use super::ast::*;
 use super::diagnostics::{Span, Spanned, DiagnosticError, print_diagnostic};
 
 /// A professional, recursive-descent parser for the Nera language.
+#[derive(Clone)]
 pub struct Parser<'a> {
     pub source: &'a str,
     lexer: Lexer<'a>,
     current_token: Token,
     next_token: Token,
     pub errors: Vec<DiagnosticError>,
+    pub is_lookahead: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -22,6 +24,7 @@ impl<'a> Parser<'a> {
             current_token,
             next_token,
             errors: Vec::new(),
+            is_lookahead: false,
         }
     }
 
@@ -36,7 +39,9 @@ impl<'a> Parser<'a> {
             span: span.clone(),
             message: message.to_string(),
         });
-        print_diagnostic(self.source, span, message);
+        if !self.is_lookahead {
+            print_diagnostic(self.source, span, message);
+        }
     }
 
     /// Consumes the current token if it matches the expected kind, otherwise returns None.
@@ -158,6 +163,39 @@ impl<'a> Parser<'a> {
     }
 
 
+    fn parse_generic_params(&mut self) -> Option<Vec<String>> {
+        let mut params = Vec::new();
+        if self.current_token.kind == TokenKind::LParen {
+            self.advance(); // consume '('
+            if self.current_token.kind != TokenKind::RParen {
+                let name = match &self.current_token.kind {
+                    TokenKind::Identifier(name) => name.clone(),
+                    _ => {
+                        self.report_error(&self.current_token.span.clone(), "Expected identifier for generic parameter");
+                        return None;
+                    }
+                };
+                params.push(name);
+                self.advance();
+                
+                while self.current_token.kind == TokenKind::Comma {
+                    self.advance(); // consume ','
+                    let next_name = match &self.current_token.kind {
+                        TokenKind::Identifier(name) => name.clone(),
+                        _ => {
+                            self.report_error(&self.current_token.span.clone(), "Expected identifier for generic parameter");
+                            return None;
+                        }
+                    };
+                    params.push(next_name);
+                    self.advance();
+                }
+            }
+            self.consume(TokenKind::RParen, "Expected ')' after generic parameters")?;
+        }
+        Some(params)
+    }
+
     fn parse_choice_decl(&mut self) -> Option<ChoiceDecl> {
         self.consume(TokenKind::Choice, "Expected 'choice'")?;
         
@@ -170,12 +208,15 @@ impl<'a> Parser<'a> {
         };
         self.advance(); // consume identifier
 
+        let generic_params = self.parse_generic_params()?;
+
         self.consume(TokenKind::LBrace, "Expected '{' before choice body")?;
 
         let mut variants = Vec::new();
         while self.current_token.kind != TokenKind::RBrace && self.current_token.kind != TokenKind::Eof {
             let variant_name = match &self.current_token.kind {
                 TokenKind::Identifier(name) => name.clone(),
+                TokenKind::NoneLiteral => "None".to_string(),
                 _ => {
                     self.report_error(&self.current_token.span.clone(), "Expected identifier for variant name");
                     return None;
@@ -208,7 +249,7 @@ impl<'a> Parser<'a> {
 
         self.consume(TokenKind::RBrace, "Expected '}' after choice body")?;
 
-        Some(ChoiceDecl { name, variants })
+        Some(ChoiceDecl { name, generic_params, variants })
     }
 
     fn parse_data_decl(&mut self) -> Option<DataDecl> {
@@ -223,6 +264,8 @@ impl<'a> Parser<'a> {
         };
         self.advance(); // consume identifier
 
+        let generic_params = self.parse_generic_params()?;
+
         self.consume(TokenKind::LBrace, "Expected '{' before data body")?;
 
         let mut fields = Vec::new();
@@ -232,7 +275,7 @@ impl<'a> Parser<'a> {
 
         self.consume(TokenKind::RBrace, "Expected '}' after data body")?;
 
-        Some(DataDecl { name, fields })
+        Some(DataDecl { name, generic_params, fields })
     }
 
     fn parse_field_decl(&mut self) -> Option<FieldDecl> {
@@ -263,6 +306,19 @@ impl<'a> Parser<'a> {
         };
         self.advance();
 
+        let mut generic_params = Vec::new();
+        if self.current_token.kind == TokenKind::LParen {
+            let mut lookahead = self.clone();
+            lookahead.is_lookahead = true;
+            lookahead.errors.clear(); // Don't care about lookahead errors
+            let _ = lookahead.parse_generic_params();
+            if lookahead.current_token.kind == TokenKind::LParen {
+                if let Some(params) = self.parse_generic_params() {
+                    generic_params = params;
+                }
+            }
+        }
+
         self.consume(TokenKind::LParen, "Expected '(' after function name")?;
 
         let mut params = Vec::new();
@@ -285,6 +341,7 @@ impl<'a> Parser<'a> {
 
         Some(FnDecl {
             name,
+            generic_params,
             params,
             return_type,
             body,
@@ -303,6 +360,19 @@ impl<'a> Parser<'a> {
             }
         };
         self.advance();
+
+        let mut generic_params = Vec::new();
+        if self.current_token.kind == TokenKind::LParen {
+            let mut lookahead = self.clone();
+            lookahead.is_lookahead = true;
+            lookahead.errors.clear();
+            let _ = lookahead.parse_generic_params();
+            if lookahead.current_token.kind == TokenKind::LParen {
+                if let Some(params) = self.parse_generic_params() {
+                    generic_params = params;
+                }
+            }
+        }
 
         self.consume(TokenKind::LParen, "Expected '(' after function name")?;
 
@@ -324,6 +394,7 @@ impl<'a> Parser<'a> {
 
         Some(ExternDecl {
             name,
+            generic_params,
             params,
             return_type,
         })
@@ -377,6 +448,23 @@ impl<'a> Parser<'a> {
             }
         };
         self.advance();
+        end_span = self.current_token.span.clone();
+
+        let mut generic_args = Vec::new();
+        if self.current_token.kind == TokenKind::LParen {
+            self.advance(); // consume '('
+            if self.current_token.kind != TokenKind::RParen {
+                generic_args.push(self.parse_type()?);
+                while self.current_token.kind == TokenKind::Comma {
+                    self.advance(); // consume ','
+                    if self.current_token.kind != TokenKind::RParen {
+                        generic_args.push(self.parse_type()?);
+                    }
+                }
+            }
+            end_span = self.current_token.span.clone();
+            self.consume(TokenKind::RParen, "Expected ')' after generic arguments")?;
+        }
 
         let mut is_array = false;
         let mut array_size = None;
@@ -392,7 +480,7 @@ impl<'a> Parser<'a> {
         }
 
         let span = start_span.merge(&end_span);
-        Some(Spanned::new(Type { name, is_array, array_size, is_ptr, is_nullable }, span))
+        Some(Spanned::new(Type { name, generic_args, is_array, array_size, is_ptr, is_nullable }, span))
     }
 
     fn parse_block(&mut self) -> Option<Spanned<Block>> {
@@ -690,6 +778,7 @@ impl<'a> Parser<'a> {
                     self.advance(); // consume '.'
                     let prop = match &self.current_token.kind {
                         TokenKind::Identifier(name) => name.clone(),
+                        TokenKind::NoneLiteral => "None".to_string(),
                         _ => {
                             self.report_error(&self.current_token.span.clone(), "Expected identifier after '.'");
                             return None;

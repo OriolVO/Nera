@@ -156,6 +156,8 @@ pub struct SemanticAnalyzer<'a> {
     pub errors: Vec<DiagnosticError>,
     current_return_ty: Option<TypeInfo>,
     pub inferred_types: HashMap<String, TypeInfo>,
+    pub generic_templates: HashMap<String, Declaration>,
+    pub instantiated_decls: Vec<Spanned<Declaration>>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -166,6 +168,8 @@ impl<'a> SemanticAnalyzer<'a> {
             errors: Vec::new(),
             current_return_ty: None,
             inferred_types: HashMap::new(),
+            generic_templates: HashMap::new(),
+            instantiated_decls: Vec::new(),
         }
     }
 
@@ -187,6 +191,21 @@ impl<'a> SemanticAnalyzer<'a> {
             self.analyze_declaration(decl);
         }
 
+        while !self.instantiated_decls.is_empty() {
+            let new_decls = std::mem::take(&mut self.instantiated_decls);
+            program.declarations.extend(new_decls);
+        }
+
+        program.declarations.retain(|decl| {
+            match &decl.node {
+                Declaration::Data(d) => d.generic_params.is_empty(),
+                Declaration::Choice(c) => c.generic_params.is_empty(),
+                Declaration::Fn(f) => f.generic_params.is_empty(),
+                Declaration::Extern(e) => e.generic_params.is_empty(),
+                _ => true,
+            }
+        });
+
         if self.errors.is_empty() {
             Ok(())
         } else {
@@ -194,22 +213,388 @@ impl<'a> SemanticAnalyzer<'a> {
         }
     }
 
+    pub fn resolve_type_ast(&mut self, ty: &Type) -> TypeInfo {
+        let base_name = self.format_type_name(ty);
+        let base = match base_name.as_str() {
+            "Int" => TypeInfo::Int,
+            "Float" => TypeInfo::Float,
+            "Boolean" => TypeInfo::Boolean,
+            "String" => TypeInfo::String,
+            "Char" => TypeInfo::Char,
+            "Void" => TypeInfo::Void,
+            "Unknown" => TypeInfo::Unknown,
+            custom => {
+                if !ty.generic_args.is_empty() {
+                    self.instantiate_generic(&ty.name, &ty.generic_args);
+                }
+                TypeInfo::Custom(custom.to_string())
+            }
+        };
+
+        let mut resolved = if ty.is_array {
+            TypeInfo::Array(Box::new(base), ty.array_size)
+        } else {
+            base
+        };
+        if ty.is_ptr {
+            resolved = TypeInfo::Pointer(Box::new(resolved));
+        }
+        if ty.is_nullable {
+            resolved = TypeInfo::Nullable(Box::new(resolved));
+        }
+        resolved
+    }
+
+    fn format_type_name(&mut self, ty: &Type) -> String {
+        if ty.generic_args.is_empty() {
+            return ty.name.clone();
+        }
+        let args: Vec<String> = ty.generic_args.iter().map(|arg| {
+            let info = self.resolve_type_ast(&arg.node);
+            info.to_string()
+        }).collect();
+        format!("{}({})", ty.name, args.join(", "))
+    }
+
+    fn instantiate_generic(&mut self, template_name: &str, generic_args: &[Spanned<Type>]) {
+        // If it's already in the env, skip
+        let concrete_name = {
+            let args: Vec<String> = generic_args.iter().map(|a| self.resolve_type_ast(&a.node).to_string()).collect();
+            format!("{}({})", template_name, args.join(", "))
+        };
+        if self.env.resolve(&concrete_name).is_some() {
+            return;
+        }
+
+        // Find the template
+        let template_decl = match self.generic_templates.get(template_name) {
+            Some(decl) => decl.clone(),
+            None => return, // Could report error here if we wanted
+        };
+
+        // Extract generic params
+        let generic_params = match &template_decl {
+            Declaration::Data(d) => d.generic_params.clone(),
+            Declaration::Choice(c) => c.generic_params.clone(),
+            Declaration::Fn(f) => f.generic_params.clone(),
+            Declaration::Extern(e) => e.generic_params.clone(),
+            _ => unreachable!(),
+        };
+
+        if generic_params.len() != generic_args.len() {
+            // Arity mismatch error would be reported here
+            return;
+        }
+
+        // Map param name to concrete Type AST
+        let mut substitutions: HashMap<String, Type> = HashMap::new();
+        for (param, arg) in generic_params.iter().zip(generic_args.iter()) {
+            substitutions.insert(param.clone(), arg.node.clone());
+        }
+
+        // Deep clone and substitute AST
+        let mut concrete_decl = template_decl.clone();
+        self.substitute_type_in_decl(&mut concrete_decl, &substitutions, &concrete_name);
+
+        // Register and analyze
+        let mut spanned_concrete = Spanned::new(concrete_decl, Span { start_line: 0, start_col: 0, end_line: 0, end_col: 0 });
+        self.register_declaration(&mut spanned_concrete);
+        self.analyze_declaration(&mut spanned_concrete);
+        self.instantiated_decls.push(spanned_concrete);
+    }
+
+    fn substitute_type_in_decl(&mut self, decl: &mut Declaration, subs: &HashMap<String, Type>, new_name: &str) {
+        match decl {
+            Declaration::Data(d) => {
+                d.name = new_name.to_string();
+                d.generic_params.clear();
+                for field in &mut d.fields {
+                    self.substitute_type(&mut field.ty.node, subs);
+                }
+            }
+            Declaration::Choice(c) => {
+                c.name = new_name.to_string();
+                c.generic_params.clear();
+                for variant in &mut c.variants {
+                    for ty in &mut variant.associated_types {
+                        self.substitute_type(&mut ty.node, subs);
+                    }
+                }
+            }
+            Declaration::Fn(f) => {
+                f.name = new_name.to_string();
+                f.generic_params.clear();
+                for param in &mut f.params {
+                    self.substitute_type(&mut param.ty.node, subs);
+                }
+                if let Some(ret) = &mut f.return_type {
+                    self.substitute_type(&mut ret.node, subs);
+                }
+                self.substitute_type_in_block(&mut f.body.node, subs);
+            }
+            Declaration::Extern(e) => {
+                e.name = new_name.to_string();
+                e.generic_params.clear();
+                for param in &mut e.params {
+                    self.substitute_type(&mut param.ty.node, subs);
+                }
+                if let Some(ret) = &mut e.return_type {
+                    self.substitute_type(&mut ret.node, subs);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn substitute_type(&mut self, ty: &mut Type, subs: &HashMap<String, Type>) {
+        if let Some(concrete_ty) = subs.get(&ty.name) {
+            // Apply substitution, keeping wrapper like pointer/array
+            let _original_ptr = ty.is_ptr;
+            let _original_array = ty.is_array;
+            let _original_size = ty.array_size;
+            let _original_nullable = ty.is_nullable;
+
+            ty.name = concrete_ty.name.clone();
+            ty.generic_args = concrete_ty.generic_args.clone();
+            
+            // If the concrete type itself is already a pointer/array, this could stack
+            // For now just logically OR them (in a real system we'd chain them cleanly)
+            ty.is_ptr = ty.is_ptr || concrete_ty.is_ptr;
+            ty.is_array = ty.is_array || concrete_ty.is_array;
+            if concrete_ty.array_size.is_some() {
+                ty.array_size = concrete_ty.array_size;
+            }
+            ty.is_nullable = ty.is_nullable || concrete_ty.is_nullable;
+        }
+
+        // Substitute recursively in generic args
+        for arg in &mut ty.generic_args {
+            self.substitute_type(&mut arg.node, subs);
+        }
+    }
+
+    fn substitute_type_in_block(&mut self, block: &mut Block, subs: &HashMap<String, Type>) {
+        for stmt in &mut block.statements {
+            self.substitute_type_in_statement(&mut stmt.node, subs);
+        }
+    }
+
+    fn substitute_type_in_statement(&mut self, stmt: &mut Statement, subs: &HashMap<String, Type>) {
+        match stmt {
+            Statement::Var(v) => {
+                if let Some(ty) = &mut v.ty {
+                    self.substitute_type(&mut ty.node, subs);
+                }
+                self.substitute_type_in_expr(&mut v.initializer.node, subs);
+            }
+            Statement::Assignment(a) => {
+                self.substitute_type_in_expr(&mut a.target.node, subs);
+                self.substitute_type_in_expr(&mut a.value.node, subs);
+            }
+            Statement::If(i) => {
+                self.substitute_type_in_expr(&mut i.condition.node, subs);
+                self.substitute_type_in_block(&mut i.then_block.node, subs);
+                if let Some(e) = &mut i.else_branch {
+                    match &mut e.node {
+                        ElseBranch::If(else_if) => {
+                            let mut temp_stmt = Statement::If(else_if.clone());
+                            self.substitute_type_in_statement(&mut temp_stmt, subs);
+                            if let Statement::If(new_else_if) = temp_stmt {
+                                *else_if = new_else_if;
+                            }
+                        }
+                        ElseBranch::Block(b) => self.substitute_type_in_block(b, subs),
+                    }
+                }
+            }
+            Statement::While(w) => {
+                self.substitute_type_in_expr(&mut w.condition.node, subs);
+                self.substitute_type_in_block(&mut w.block.node, subs);
+            }
+            Statement::Return(r) => {
+                if let Some(e) = &mut r.value {
+                    self.substitute_type_in_expr(&mut e.node, subs);
+                }
+            }
+            Statement::Expr(e) => self.substitute_type_in_expr(&mut e.node, subs),
+            Statement::Free(f) => self.substitute_type_in_expr(&mut f.node, subs),
+        }
+    }
+
+    fn substitute_type_in_expr(&mut self, expr: &mut Expression, subs: &HashMap<String, Type>) {
+        match expr {
+            Expression::Binary(b) => {
+                self.substitute_type_in_expr(&mut b.left.node, subs);
+                self.substitute_type_in_expr(&mut b.right.node, subs);
+            }
+            Expression::Call(c) => {
+                self.substitute_type_in_expr(&mut c.callee.node, subs);
+                for arg in &mut c.arguments {
+                    self.substitute_type_in_expr(&mut arg.node, subs);
+                }
+            }
+            Expression::Property(p) => self.substitute_type_in_expr(&mut p.object.node, subs),
+            Expression::StructFieldAccess(s) => self.substitute_type_in_expr(&mut s.object.node, subs),
+            Expression::Alloc(a) => self.substitute_type(&mut a.ty.node, subs),
+            Expression::Deref(d) => self.substitute_type_in_expr(&mut d.node, subs),
+            Expression::VectorSlice(v) => {
+                self.substitute_type_in_expr(&mut v.target.node, subs);
+                if let Some(s) = &mut v.start { self.substitute_type_in_expr(&mut s.node, subs); }
+                if let Some(e) = &mut v.end { self.substitute_type_in_expr(&mut e.node, subs); }
+            }
+            Expression::Index(i) => {
+                self.substitute_type_in_expr(&mut i.target.node, subs);
+                self.substitute_type_in_expr(&mut i.index.node, subs);
+            }
+            Expression::StringIndex(s) => {
+                self.substitute_type_in_expr(&mut s.target.node, subs);
+                self.substitute_type_in_expr(&mut s.index.node, subs);
+            }
+            Expression::StringSlice(s) => {
+                self.substitute_type_in_expr(&mut s.target.node, subs);
+                if let Some(st) = &mut s.start { self.substitute_type_in_expr(&mut st.node, subs); }
+                if let Some(e) = &mut s.end { self.substitute_type_in_expr(&mut e.node, subs); }
+            }
+            Expression::StringEq(s) | Expression::StringNotEq(s) => {
+                self.substitute_type_in_expr(&mut s.left.node, subs);
+                self.substitute_type_in_expr(&mut s.right.node, subs);
+            }
+            Expression::Primary(p) => {
+                if let PrimaryExpr::Grouped(g) = p {
+                    self.substitute_type_in_expr(&mut g.node, subs);
+                }
+            }
+            Expression::When(w) => {
+                self.substitute_type_in_expr(&mut w.target.node, subs);
+                for c in &mut w.cases {
+                    self.substitute_type_in_block(&mut c.body.node, subs);
+                }
+            }
+            Expression::VariantConstruct(v) => {
+                for arg in &mut v.arguments {
+                    self.substitute_type_in_expr(&mut arg.node, subs);
+                }
+            }
+        }
+    }
+
+
+    fn extract_generic_args(&self, expected_ast: &Type, actual_info: &TypeInfo, generic_params: &[String], inferred_args: &mut Vec<Option<Type>>) {
+        // Base case: is expected_ast.name one of the generic params?
+        if let Some(pos) = generic_params.iter().position(|p| p == &expected_ast.name) {
+            // Found a match! We need to reconstruct a Type from actual_info
+            if inferred_args[pos].is_none() {
+                // Strip pointer/array layers based on what we expected
+                let mut inner_info = actual_info;
+                if expected_ast.is_ptr {
+                    if let TypeInfo::Pointer(inner) = inner_info {
+                        inner_info = inner;
+                    }
+                }
+                if expected_ast.is_array {
+                    if let TypeInfo::Array(inner, _) = inner_info {
+                        inner_info = inner;
+                    }
+                }
+                if expected_ast.is_nullable {
+                    if let TypeInfo::Nullable(inner) = inner_info {
+                        inner_info = inner;
+                    }
+                }
+                
+                // Reconstruct Type (basic approximation)
+                let reconstructed = Type {
+                    name: inner_info.to_string(), // In real compiler, we'd parse this back into AST, but string format works for now since Monomorphization uses it as a unique key. Wait, no, we substitute it into AST!
+                    generic_args: vec![], // For now we just assume T resolves to a non-generic or fully resolved generic name string
+                    is_array: false,
+                    array_size: None,
+                    is_ptr: false,
+                    is_nullable: false,
+                };
+                inferred_args[pos] = Some(reconstructed);
+            }
+        }
+        
+        
+        // Strip wrappers for deep inspection
+        let mut inner_info = actual_info;
+        if expected_ast.is_ptr {
+            if let TypeInfo::Pointer(inner) = inner_info {
+                inner_info = inner;
+            }
+        }
+        if expected_ast.is_array {
+            if let TypeInfo::Array(inner, _) = inner_info {
+                inner_info = inner;
+            }
+        }
+        if expected_ast.is_nullable {
+            if let TypeInfo::Nullable(inner) = inner_info {
+                inner_info = inner;
+            }
+        }
+
+        // If not a direct match, but it's a generic type (e.g. List(T)), recurse into generic_args
+        if let TypeInfo::Custom(custom_str) = inner_info {
+            if let Some(open_idx) = custom_str.find('(') {
+                if let Some(close_idx) = custom_str.rfind(')') {
+                    let actual_args_str = &custom_str[open_idx+1..close_idx];
+                    let actual_args: Vec<&str> = actual_args_str.split(", ").collect();
+                    
+                    for (i, expected_arg) in expected_ast.generic_args.iter().enumerate() {
+                        if i < actual_args.len() {
+                            let arg_info = match actual_args[i] {
+                                "Int" => TypeInfo::Int,
+                                "Float" => TypeInfo::Float,
+                                "String" => TypeInfo::String,
+                                "Boolean" => TypeInfo::Boolean,
+                                "Char" => TypeInfo::Char,
+                                other => TypeInfo::Custom(other.to_string()),
+                            };
+                            self.extract_generic_args(&expected_arg.node, &arg_info, generic_params, inferred_args);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn register_declaration(&mut self, decl: &mut Spanned<Declaration>) {
+        let is_generic = match &decl.node {
+            Declaration::Data(d) => !d.generic_params.is_empty(),
+            Declaration::Choice(c) => !c.generic_params.is_empty(),
+            Declaration::Fn(f) => !f.generic_params.is_empty(),
+            Declaration::Extern(e) => !e.generic_params.is_empty(),
+            Declaration::Var(_) => false,
+        };
+
+        if is_generic {
+            let name = match &decl.node {
+                Declaration::Data(d) => d.name.clone(),
+                Declaration::Choice(c) => c.name.clone(),
+                Declaration::Fn(f) => f.name.clone(),
+                Declaration::Extern(e) => e.name.clone(),
+                _ => unreachable!(),
+            };
+            self.generic_templates.insert(name, decl.node.clone());
+            return;
+        }
+
         match &mut decl.node {
             Declaration::Data(data_decl) => {
                 let mut fields = Vec::new();
                 for field in &data_decl.fields {
-                    fields.push((field.name.clone(), TypeInfo::from_ast(&field.ty.node)));
+                    fields.push((field.name.clone(), self.resolve_type_ast(&field.ty.node)));
                 }
                 self.env.define(data_decl.name.clone(), Symbol::Data(DataSymbol { fields }));
             }
             Declaration::Fn(fn_decl) => {
                 let mut params = Vec::new();
                 for param in &fn_decl.params {
-                    params.push((param.name.clone(), TypeInfo::from_ast(&param.ty.node)));
+                    params.push((param.name.clone(), self.resolve_type_ast(&param.ty.node)));
                 }
                 let return_ty = if let Some(ty) = &fn_decl.return_type {
-                    TypeInfo::from_ast(&ty.node)
+                    self.resolve_type_ast(&ty.node)
                 } else {
                     TypeInfo::Void
                 };
@@ -218,10 +603,10 @@ impl<'a> SemanticAnalyzer<'a> {
             Declaration::Extern(extern_decl) => {
                 let mut params = Vec::new();
                 for param in &extern_decl.params {
-                    params.push((param.name.clone(), TypeInfo::from_ast(&param.ty.node)));
+                    params.push((param.name.clone(), self.resolve_type_ast(&param.ty.node)));
                 }
                 let return_ty = if let Some(ty) = &extern_decl.return_type {
-                    TypeInfo::from_ast(&ty.node)
+                    self.resolve_type_ast(&ty.node)
                 } else {
                     TypeInfo::Void
                 };
@@ -232,7 +617,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 let mut variants = HashMap::new();
                 for variant in &choice_decl.variants {
                     let types: Vec<TypeInfo> = variant.associated_types.iter()
-                        .map(|t| TypeInfo::from_ast(&t.node))
+                        .map(|t| self.resolve_type_ast(&t.node))
                         .collect();
                     variants.insert(variant.name.clone(), types);
                 }
@@ -242,6 +627,18 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     fn analyze_declaration(&mut self, decl: &mut Spanned<Declaration>) {
+        let is_generic = match &decl.node {
+            Declaration::Data(d) => !d.generic_params.is_empty(),
+            Declaration::Choice(c) => !c.generic_params.is_empty(),
+            Declaration::Fn(f) => !f.generic_params.is_empty(),
+            Declaration::Extern(e) => !e.generic_params.is_empty(),
+            Declaration::Var(_) => false,
+        };
+
+        if is_generic {
+            return;
+        }
+
         match &mut decl.node {
             Declaration::Data(_) => {}
             Declaration::Choice(_) => {}
@@ -249,7 +646,7 @@ impl<'a> SemanticAnalyzer<'a> {
             Declaration::Fn(fn_decl) => {
                 self.env.enter_scope();
                 for param in &fn_decl.params {
-                    let ty_info = TypeInfo::from_ast(&param.ty.node);
+                    let ty_info = self.resolve_type_ast(&param.ty.node);
                     self.env.define(param.name.clone(), Symbol::Variable(VariableSymbol {
                         is_mut: param.is_mut,
                         ty: ty_info.clone(),
@@ -259,7 +656,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
 
                 let expected_ret = if let Some(ty) = &fn_decl.return_type {
-                    TypeInfo::from_ast(&ty.node)
+                    self.resolve_type_ast(&ty.node)
                 } else {
                     TypeInfo::Void
                 };
@@ -274,7 +671,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 let mut size = None;
                 let final_ty = if let Some(explicit_ty) = &var_decl.ty {
                     size = explicit_ty.node.array_size;
-                    let explicit_info = TypeInfo::from_ast(&explicit_ty.node);
+                    let explicit_info = self.resolve_type_ast(&explicit_ty.node);
                     if explicit_info != inferred_ty && inferred_ty != TypeInfo::Unknown {
                         let valid_null = matches!(&explicit_info, TypeInfo::Nullable(_)) && inferred_ty == TypeInfo::None;
                         if !valid_null {
@@ -313,7 +710,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 let mut size = None;
                 let final_ty = if let Some(explicit_ty) = &var_decl.ty {
                     size = explicit_ty.node.array_size;
-                    let explicit_info = TypeInfo::from_ast(&explicit_ty.node);
+                    let explicit_info = self.resolve_type_ast(&explicit_ty.node);
                     if explicit_info != inferred_ty && inferred_ty != TypeInfo::Unknown {
                         let valid_null = matches!(&explicit_info, TypeInfo::Nullable(_)) && inferred_ty == TypeInfo::None;
                         if !valid_null {
@@ -369,7 +766,7 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 if let Some(root_name) = self.get_root_identifier(&assignment.target) {
                     if let Some(Symbol::Variable(var_sym)) = self.env.resolve(&root_name) {
-                        if !var_sym.is_mut {
+                        if !var_sym.is_mut && !self.is_dereferenced(&assignment.target) {
                             self.report_error(&assignment.target.span, &format!("Mutation of immutable binding '{}' is strictly forbidden.", root_name));
                         }
                     } else {
@@ -651,11 +1048,51 @@ impl<'a> SemanticAnalyzer<'a> {
                         }
                     }
                     
-                    let fn_info = if let Some(Symbol::Function(fn_sym)) = self.env.resolve(name) {
+                    let mut fn_info = if let Some(Symbol::Function(fn_sym)) = self.env.resolve(name) {
                         Some((fn_sym.params.clone(), fn_sym.return_ty.clone()))
                     } else {
                         None
                     };
+                    
+                    if fn_info.is_none() {
+                        if let Some(template_decl) = self.generic_templates.get(name).cloned() {
+                            let (generic_params, params) = match &template_decl {
+                                Declaration::Fn(f) => (&f.generic_params, &f.params),
+                                Declaration::Extern(e) => (&e.generic_params, &e.params),
+                                _ => return TypeInfo::Unknown,
+                            };
+                            
+                            let mut inferred_args: Vec<Option<Type>> = vec![None; generic_params.len()];
+                            
+                            for (i, param) in params.iter().enumerate() {
+                                if i < arg_types.len() {
+                                    self.extract_generic_args(&param.ty.node, &arg_types[i], generic_params, &mut inferred_args);
+                                }
+                            }
+                            
+                            let all_inferred = inferred_args.iter().all(|a| a.is_some());
+                            if all_inferred {
+                                let args_unwrapped: Vec<Spanned<Type>> = inferred_args.into_iter()
+                                    .map(|t| Spanned::new(t.unwrap(), Span { start_line: 0, start_col: 0, end_line: 0, end_col: 0 }))
+                                    .collect();
+                                
+                                self.instantiate_generic(name, &args_unwrapped);
+                                
+                                let concrete_name = {
+                                    let args_str: Vec<String> = args_unwrapped.iter()
+                                        .map(|a| self.resolve_type_ast(&a.node).to_string())
+                                        .collect();
+                                    format!("{}({})", name, args_str.join(", "))
+                                };
+                                
+                                *name = concrete_name.clone();
+                                
+                                if let Some(Symbol::Function(fn_sym)) = self.env.resolve(&concrete_name) {
+                                    fn_info = Some((fn_sym.params.clone(), fn_sym.return_ty.clone()));
+                                }
+                            }
+                        }
+                    }
                     
                     if let Some((expected_params, return_ty)) = fn_info {
                         if arg_types.len() != expected_params.len() {
@@ -798,7 +1235,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
             }
             Expression::Alloc(alloc_expr) => {
-                let allocated_type = TypeInfo::from_ast(&alloc_expr.ty.node);
+                let allocated_type = self.resolve_type_ast(&alloc_expr.ty.node);
                 if let TypeInfo::Custom(name) = &allocated_type {
                     let mut found = false;
                     if let Some(sym) = self.env.resolve(name) {
@@ -928,6 +1365,17 @@ impl<'a> SemanticAnalyzer<'a> {
             Expression::Index(index_expr) => self.get_root_identifier(&index_expr.target),
             Expression::Deref(inner) => self.get_root_identifier(inner),
             _ => None,
+        }
+    }
+
+    fn is_dereferenced(&self, expr: &Spanned<Expression>) -> bool {
+        match &expr.node {
+            Expression::Deref(_) => true,
+            Expression::Property(prop_access) => self.is_dereferenced(&prop_access.object),
+            Expression::StructFieldAccess(access) => self.is_dereferenced(&access.object),
+            Expression::VectorSlice(slice_expr) => self.is_dereferenced(&slice_expr.target),
+            Expression::Index(index_expr) => self.is_dereferenced(&index_expr.target),
+            _ => false,
         }
     }
 

@@ -1,0 +1,27 @@
+use std.collections
+use std.io
+
+fn main() {
+    let dummy_int = alloc Int()
+    mut my_ints = new_list(2, dummy_int)
+    
+    list_push(my_ints, 10)
+    list_push(my_ints, 20)
+    
+    // Trigger reallocation
+    list_push(my_ints, 30)
+    
+    let a = list_get(my_ints, 0)
+    let b = list_get(my_ints, 1)
+    let c = list_get(my_ints, 2)
+    
+    if a == 10 {
+        if b == 20 {
+            if c == 30 {
+                puts("Collections test passed!")
+            }
+        }
+    }
+    
+    list_free(my_ints)
+}

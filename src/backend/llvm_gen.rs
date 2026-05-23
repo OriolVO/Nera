@@ -135,7 +135,7 @@ impl LLVMGenerator {
             }
         }
 
-        self.builder.declare("declare i8* @aligned_alloc(i64, i64)");
+        self.builder.declare("declare i8* @malloc(i64)");
         self.builder.declare("declare void @free(i8*)");
         self.builder.declare("declare i8* @strncpy(i8*, i8*, i64)");
         self.builder.declare("declare i32 @strcmp(i8*, i8*)");
@@ -153,14 +153,23 @@ impl LLVMGenerator {
     }
 
     fn lower_function(&mut self, func: &IRFunction, soa_arrays: &Vec<(String, i64)>) -> Result<(), CompileError> {
-        let ret_info = match func.return_type.as_str() {
+
+        let mut ret_info_str = func.return_type.as_str();
+        let is_nullable = ret_info_str.starts_with('?');
+        if is_nullable { ret_info_str = &ret_info_str[1..]; }
+        let is_ptr = ret_info_str.starts_with('^');
+        if is_ptr { ret_info_str = &ret_info_str[1..]; }
+        
+        let mut ret_info = match ret_info_str {
             "Int" => TypeInfo::Int,
             "Float" => TypeInfo::Float,
             "Boolean" => TypeInfo::Boolean,
             "String" => TypeInfo::String,
             "Void" => TypeInfo::Void,
-            _ => TypeInfo::Custom(func.return_type.clone()),
+            _ => TypeInfo::Custom(ret_info_str.to_string()),
         };
+        if is_ptr { ret_info = TypeInfo::Pointer(Box::new(ret_info)); }
+        if is_nullable { ret_info = TypeInfo::Nullable(Box::new(ret_info)); }
         let mut ret_ty = self.type_to_llvm(&ret_info);
         if func.name == "main" {
             ret_ty = LLVMType::I32;
@@ -184,13 +193,15 @@ impl LLVMGenerator {
             }
         }
 
+        let sanitized_name = func.name.replace("(", "_").replace(")", "").replace(", ", "_");
+
         if func.is_extern {
             let param_strs: Vec<String> = params.iter().map(|(_, t)| t.to_string()).collect();
-            self.builder.declare(&format!("declare {} @{}({})", ret_ty.to_string(), func.name, param_strs.join(", ")));
+            self.builder.declare(&format!("declare {} @{}({})", ret_ty.to_string(), sanitized_name, param_strs.join(", ")));
             return Ok(());
         }
 
-        self.builder.start_function(&func.name, ret_ty.clone(), params.clone());
+        self.builder.start_function(&sanitized_name, ret_ty.clone(), params.clone());
 
         let mut first_block = true;
         for block in &func.blocks {
@@ -205,7 +216,7 @@ impl LLVMGenerator {
 
                     let total_elements = soa_arrays.iter().map(|(_, sz)| *sz).max().unwrap_or(0);
                     if total_elements == 0 {
-                        let arena_start_i8 = self.builder.build_call(LLVMType::Pointer(Box::new(LLVMType::I8)), "aligned_alloc", vec![LLVMValue::ConstI64(32), LLVMValue::ConstI64(32)]);
+                        let arena_start_i8 = self.builder.build_call(LLVMType::Pointer(Box::new(LLVMType::I8)), "malloc", vec![LLVMValue::ConstI64(32)]);
                         self.main_arena_ptr = Some(arena_start_i8);
                     } else {
                         let mut size_of_struct: i64 = 0;
@@ -223,7 +234,7 @@ impl LLVMGenerator {
                         let arena_size = total_elements * size_of_struct;
                         let arena_size_val = LLVMValue::ConstI64(arena_size.max(8)); // at least 8 bytes
 
-                        let arena_start_i8 = self.builder.build_call(LLVMType::Pointer(Box::new(LLVMType::I8)), "aligned_alloc", vec![LLVMValue::ConstI64(32), arena_size_val]);
+                        let arena_start_i8 = self.builder.build_call(LLVMType::Pointer(Box::new(LLVMType::I8)), "malloc", vec![arena_size_val]);
                         self.main_arena_ptr = Some(arena_start_i8.clone());
                         let arena_start = self.builder.build_bitcast(arena_start_i8.clone(), LLVMType::Pointer(Box::new(LLVMType::I64)));
 
@@ -335,7 +346,7 @@ impl LLVMGenerator {
         Ok(())
     }
 
-    fn lower_instruction(&mut self, instr: &IRInstruction, soa_arrays: &Vec<(String, i64)>) -> Result<(), CompileError> {
+    fn lower_instruction(&mut self, instr: &IRInstruction, _soa_arrays: &Vec<(String, i64)>) -> Result<(), CompileError> {
         match instr {
             IRInstruction::Assign(dest, src) => {
                 if matches!(src, IROperand::Void) { return Ok(()); }
@@ -378,16 +389,17 @@ impl LLVMGenerator {
                 }
             }
             IRInstruction::Call(dest_opt, callee, args) => {
-                let callee_str = match callee {
+                let mut callee_str = match callee {
                     IROperand::Variable(n) => n.clone(),
                     _ => "unknown".to_string(),
                 };
+                callee_str = callee_str.replace("(", "_").replace(")", "").replace(", ", "_");
 
                 let mut arg_vals = Vec::new();
                 for arg in args {
                     if let IROperand::Variable(vname) = arg {
                         if let Some(ptr) = self.function_params.get(vname) {
-                            if let LLVMType::Pointer(inner) = ptr.get_type() {
+                            if let LLVMType::Pointer(_inner) = ptr.get_type() {
                                 let is_scalar = self.scalar_vars.contains(vname) || vname.starts_with("param_");
                                 if is_scalar {
                                     arg_vals.push(self.builder.build_load(ptr.clone(), None)?);
@@ -405,10 +417,66 @@ impl LLVMGenerator {
                     }
                 }
 
-                let ret_ty = if dest_opt.is_some() { LLVMType::I64 } else { LLVMType::Void };
-                let res = self.builder.build_call(ret_ty, &callee_str, arg_vals);
-                if let Some(IROperand::TempReg(t)) = dest_opt {
-                    self.temp_map.insert(*t, res);
+                if callee_str.starts_with("alloc_array_") {
+                    let type_name = callee_str.strip_prefix("alloc_array_").unwrap();
+                    let target_ty = self.type_env.get(type_name).unwrap_or(&TypeInfo::Int);
+                    let element_size = match target_ty {
+                         TypeInfo::Float => 8,
+                         TypeInfo::Boolean => 1,
+                         _ => 8,
+                    };
+                    
+                    let count_val = arg_vals[0].clone(); // First argument is capacity
+                    let bytes_val = self.builder.build_mul(count_val, LLVMValue::ConstI64(element_size));
+                    let alloc_call = self.builder.build_call(
+                        LLVMType::Pointer(Box::new(LLVMType::I8)),
+                        "malloc",
+                        vec![bytes_val]
+                    );
+                    let target_llvm_ty = self.type_to_llvm(target_ty);
+                    let casted_ptr = self.builder.build_bitcast(alloc_call, LLVMType::Pointer(Box::new(target_llvm_ty)));
+                    if let Some(IROperand::TempReg(t)) = dest_opt {
+                        self.temp_map.insert(*t, casted_ptr);
+                    }
+                } else if callee_str.starts_with("free_array_") {
+                    let ptr_val = arg_vals[0].clone();
+                    let void_ptr = self.builder.build_bitcast(ptr_val, LLVMType::Pointer(Box::new(LLVMType::I8)));
+                    self.builder.build_call(
+                        LLVMType::Void,
+                        "free",
+                        vec![void_ptr]
+                    );
+                } else if callee_str.starts_with("ptr_read_") {
+                    let ptr_val = arg_vals[0].clone();
+                    let offset_val = arg_vals[1].clone();
+                    
+                    let type_name = callee_str.strip_prefix("ptr_read_").unwrap();
+                    let target_ty = self.type_env.get(type_name).unwrap_or(&TypeInfo::Int);
+                    let target_llvm_ty = self.type_to_llvm(target_ty);
+                    
+                    let gep = self.builder.build_gep(target_llvm_ty, ptr_val, vec![offset_val]).unwrap();
+                    let loaded = self.builder.build_load(gep, None).unwrap();
+                    
+                    if let Some(IROperand::TempReg(t)) = dest_opt {
+                        self.temp_map.insert(*t, loaded);
+                    }
+                } else if callee_str.starts_with("ptr_write_") {
+                    let ptr_val = arg_vals[0].clone();
+                    let offset_val = arg_vals[1].clone();
+                    let val_val = arg_vals[2].clone();
+                    
+                    let type_name = callee_str.strip_prefix("ptr_write_").unwrap();
+                    let target_ty = self.type_env.get(type_name).unwrap_or(&TypeInfo::Int);
+                    let target_llvm_ty = self.type_to_llvm(target_ty);
+                    
+                    let gep = self.builder.build_gep(target_llvm_ty, ptr_val, vec![offset_val]).unwrap();
+                    self.builder.build_store(val_val, gep, None);
+                } else {
+                    let ret_ty = if dest_opt.is_some() { LLVMType::I64 } else { LLVMType::Void };
+                    let res = self.builder.build_call(ret_ty, &callee_str, arg_vals);
+                    if let Some(IROperand::TempReg(t)) = dest_opt {
+                        self.temp_map.insert(*t, res);
+                    }
                 }
             }
             IRInstruction::LoadProperty(dest, obj, prop) => {
@@ -677,21 +745,19 @@ impl LLVMGenerator {
                     self.temp_map.insert(*t, tag_val);
                 }
             }
-            IRInstruction::Alloc(dest, type_name) => {
+            IRInstruction::Alloc(dest, type_name, size_in_bytes) => {
                 let target_llvm_ty = if let Some(ty) = self.type_env.get(type_name) {
                     self.type_to_llvm(ty)
                 } else {
                     LLVMType::I64
                 };
 
-                let null_ptr = LLVMValue::Null(LLVMType::Pointer(Box::new(target_llvm_ty.clone())));
-                let gep = self.builder.build_gep(target_llvm_ty.clone(), null_ptr, vec![LLVMValue::ConstI32(1)])?;
-                let size_val = self.builder.build_ptr_to_int(gep, LLVMType::I64);
+                let size_val = LLVMValue::ConstI64(*size_in_bytes as i64);
 
                 let alloc_call = self.builder.build_call(
                     LLVMType::Pointer(Box::new(LLVMType::I8)),
-                    "aligned_alloc",
-                    vec![LLVMValue::ConstI64(32), size_val]
+                    "malloc",
+                    vec![size_val]
                 );
                 
 
@@ -739,8 +805,8 @@ impl LLVMGenerator {
                 let size_in_bytes = (args.len() as i64 + 1) * 8;
                 let alloc_call = self.builder.build_call(
                     LLVMType::Pointer(Box::new(LLVMType::I8)),
-                    "aligned_alloc",
-                    vec![LLVMValue::ConstI64(32), LLVMValue::ConstI64(size_in_bytes)]
+                    "malloc",
+                    vec![LLVMValue::ConstI64(size_in_bytes)]
                 );
                 let ptr = self.builder.build_bitcast(alloc_call, LLVMType::Pointer(Box::new(LLVMType::I64)));
                 
@@ -815,8 +881,8 @@ impl LLVMGenerator {
                 
                 let new_str = self.builder.build_call(
                     LLVMType::Pointer(Box::new(LLVMType::I8)),
-                    "aligned_alloc",
-                    vec![LLVMValue::ConstI64(32), alloc_size]
+                    "malloc",
+                    vec![alloc_size]
                 );
                 
                 let src_ptr = self.builder.build_gep(LLVMType::I8, str_val, vec![start_val])?;

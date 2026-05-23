@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use crate::error::CompileError;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,7 +72,13 @@ impl LLVMValue {
                     v.to_string()
                 }
             }
-            LLVMValue::Null(_) => "null".to_string(),
+            LLVMValue::Null(t) => {
+                match t {
+                    LLVMType::Pointer(_) => "null".to_string(),
+                    LLVMType::Double => "0.0".to_string(),
+                    _ => "0".to_string(),
+                }
+            },
             LLVMValue::ConstGlobalStringPtr(name, len) => format!("getelementptr inbounds ([{} x i8], [{} x i8]* @{}, i64 0, i64 0)", len, len, name),
         }
     }
@@ -296,7 +301,7 @@ impl IRBuilder {
 
     pub fn build_gep(&mut self, base_ty: LLVMType, ptr: LLVMValue, indices: Vec<LLVMValue>) -> Result<LLVMValue, CompileError> {
         let dest = self.next_reg_name();
-        let ptr_ty = match ptr.get_type() {
+        let _ptr_ty = match ptr.get_type() {
             LLVMType::Pointer(inner) => *inner,
             _ => return Err(CompileError::BackendError("build_gep on non-pointer".to_string())), // Handled by outer match
         };
@@ -419,8 +424,15 @@ impl IRBuilder {
     }
 
     pub fn build_bitcast(&mut self, val: LLVMValue, dest_ty: LLVMType) -> LLVMValue {
-        let dest = self.next_reg_name();
         let src_ty = val.get_type();
+        if src_ty == LLVMType::I64 && matches!(dest_ty, LLVMType::Pointer(_)) {
+            return self.build_int_to_ptr(val, dest_ty);
+        }
+        if matches!(src_ty, LLVMType::Pointer(_)) && dest_ty == LLVMType::I64 {
+            return self.build_ptr_to_int(val, dest_ty);
+        }
+        
+        let dest = self.next_reg_name();
         self.push_instr(LLVMInstruction::BitCast(dest.clone(), dest_ty.clone(), val, src_ty));
         LLVMValue::Reg(dest, dest_ty)
     }

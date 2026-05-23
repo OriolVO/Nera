@@ -174,7 +174,7 @@ impl IROptimizer {
                 add_use(obj);
                 add_def(dest);
             }
-            IRInstruction::Alloc(dest, _) => {
+            IRInstruction::Alloc(dest, _, _) => {
                 add_def(dest);
             }
             IRInstruction::LoadPointer(dest, ptr) => {
