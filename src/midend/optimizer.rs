@@ -202,6 +202,22 @@ impl IROptimizer {
                 add_use(ptr);
                 add_use(val);
             }
+            IRInstruction::LoadStringChar(dest, str_ptr, index) => {
+                add_use(str_ptr);
+                add_use(index);
+                add_def(dest);
+            }
+            IRInstruction::Substring(dest, str_ptr, start, end) => {
+                add_use(str_ptr);
+                add_use(start);
+                add_use(end);
+                add_def(dest);
+            }
+            IRInstruction::StringCompare(dest, left, right, _) => {
+                add_use(left);
+                add_use(right);
+                add_def(dest);
+            }
         }
         (uses, defs)
     }

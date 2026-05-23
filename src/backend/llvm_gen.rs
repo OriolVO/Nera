@@ -40,8 +40,12 @@ impl LLVMGenerator {
                 LLVMType::Pointer(Box::new(inner_llvm))
             }
             TypeInfo::Pointer(inner) => {
-                let inner_llvm = self.type_to_llvm(inner);
-                LLVMType::Pointer(Box::new(inner_llvm))
+                if **inner == TypeInfo::Void {
+                    LLVMType::Pointer(Box::new(LLVMType::I8))
+                } else {
+                    let inner_llvm = self.type_to_llvm(inner);
+                    LLVMType::Pointer(Box::new(inner_llvm))
+                }
             }
             TypeInfo::Void => LLVMType::Void,
             _ => LLVMType::I64,
@@ -133,6 +137,8 @@ impl LLVMGenerator {
 
         self.builder.declare("declare i8* @aligned_alloc(i64, i64)");
         self.builder.declare("declare void @free(i8*)");
+        self.builder.declare("declare i8* @strncpy(i8*, i8*, i64)");
+        self.builder.declare("declare i32 @strcmp(i8*, i8*)");
 
         for func in &optimized_ir.functions {
             self.lower_function(func, &actual_soa_arrays)?;
@@ -298,7 +304,7 @@ impl LLVMGenerator {
                         } else if ret_ty == LLVMType::Void {
                             self.builder.build_ret(None);
                         } else {
-                            self.builder.build_ret(Some(LLVMValue::ConstI64(0)));
+                            self.builder.build_ret(Some(LLVMValue::Null(ret_ty.clone())));
                         }
                     }
                 }
@@ -784,6 +790,71 @@ impl LLVMGenerator {
                     self.temp_map.insert(*t, payload_val);
                 }
             }
+            IRInstruction::LoadStringChar(dest, str_ptr, index) => {
+                let str_val = self.operand_to_value(str_ptr)?;
+                let idx_val = self.operand_to_value(index)?;
+                
+                // Get pointer to character
+                let char_ptr = self.builder.build_gep(LLVMType::I8, str_val, vec![idx_val])?;
+                // Load i8 character
+                let char_val = self.builder.build_load(char_ptr, Some(1))?;
+                // Zero extend to i64 to match Nera Int/Char representation
+                let char_i64 = self.builder.build_zext(char_val, LLVMType::I64);
+                
+                if let IROperand::TempReg(t) = dest {
+                    self.temp_map.insert(*t, char_i64);
+                }
+            }
+            IRInstruction::Substring(dest, str_ptr, start_op, end_op) => {
+                let str_val = self.operand_to_value(str_ptr)?;
+                let start_val = self.operand_to_value(start_op)?;
+                let end_val = self.operand_to_value(end_op)?;
+                
+                let len = self.builder.build_sub(end_val, start_val.clone());
+                let alloc_size = self.builder.build_add(len.clone(), LLVMValue::ConstI64(1)); // +1 for null terminator
+                
+                let new_str = self.builder.build_call(
+                    LLVMType::Pointer(Box::new(LLVMType::I8)),
+                    "aligned_alloc",
+                    vec![LLVMValue::ConstI64(32), alloc_size]
+                );
+                
+                let src_ptr = self.builder.build_gep(LLVMType::I8, str_val, vec![start_val])?;
+                
+                self.builder.build_call(
+                    LLVMType::Pointer(Box::new(LLVMType::I8)),
+                    "strncpy",
+                    vec![new_str.clone(), src_ptr, len.clone()]
+                );
+                
+                // Add null terminator
+                let null_ptr = self.builder.build_gep(LLVMType::I8, new_str.clone(), vec![len])?;
+                self.builder.build_store(LLVMValue::ConstI8(0), null_ptr, Some(1));
+                
+                if let IROperand::TempReg(t) = dest {
+                    self.temp_map.insert(*t, new_str);
+                }
+            }
+            IRInstruction::StringCompare(dest, left, right, is_eq) => {
+                let left_val = self.operand_to_value(left)?;
+                let right_val = self.operand_to_value(right)?;
+                
+                let cmp_res = self.builder.build_call(
+                    LLVMType::I32,
+                    "strcmp",
+                    vec![left_val, right_val]
+                );
+                
+                let bool_res = if *is_eq {
+                    self.builder.build_icmp("eq", cmp_res, LLVMValue::ConstI32(0))
+                } else {
+                    self.builder.build_icmp("ne", cmp_res, LLVMValue::ConstI32(0))
+                };
+                
+                if let IROperand::TempReg(t) = dest {
+                    self.temp_map.insert(*t, bool_res);
+                }
+            }
         }
         Ok(())
     }
@@ -793,6 +864,7 @@ impl LLVMGenerator {
             IROperand::LiteralInt(v) => Ok(LLVMValue::ConstI64(*v)),
             IROperand::LiteralFloat(v) => Ok(LLVMValue::ConstDouble(*v)),
             IROperand::LiteralString(v) => Ok(self.builder.build_global_string_ptr(v)),
+            IROperand::LiteralChar(v) => Ok(LLVMValue::ConstI64(*v)),
             IROperand::LiteralBool(v) => Ok(LLVMValue::ConstI1(*v)),
             IROperand::Variable(name) => {
                 if let Some(ptr) = self.function_params.get(name) {

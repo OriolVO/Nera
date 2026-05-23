@@ -1,0 +1,6 @@
+// String Standard Library for Nera
+// Provides FFI bindings for C standard library string functions
+
+extern fn strlen(s: String) -> Int
+extern fn strcmp(s1: String, s2: String) -> Int
+extern fn strncpy(dest: String, src: String, n: Int) -> String

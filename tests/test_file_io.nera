@@ -1,0 +1,12 @@
+use std.io
+use std.fs
+
+fn main() -> Int {
+    let path = "tests/test_string.nera"
+    let content = read_file_to_string(path)
+    
+    puts("File contents:")
+    puts(content)
+    
+    return 0
+}

@@ -36,6 +36,7 @@ pub enum LLVMValue {
     Global(String, LLVMType),
     ConstGlobalStringPtr(String, usize),
     ConstI1(bool),
+    ConstI8(i8),
     ConstI32(i32),
     ConstI64(i64),
     ConstDouble(f64),
@@ -48,6 +49,7 @@ impl LLVMValue {
             LLVMValue::Reg(_, t) => t.clone(),
             LLVMValue::Global(_, t) => t.clone(),
             LLVMValue::ConstI1(_) => LLVMType::I1,
+            LLVMValue::ConstI8(_) => LLVMType::I8,
             LLVMValue::ConstI32(_) => LLVMType::I32,
             LLVMValue::ConstI64(_) => LLVMType::I64,
             LLVMValue::ConstDouble(_) => LLVMType::Double,
@@ -61,6 +63,7 @@ impl LLVMValue {
             LLVMValue::Reg(name, _) => format!("%{}", name),
             LLVMValue::Global(name, _) => format!("@{}", name),
             LLVMValue::ConstI1(v) => if *v { "1".to_string() } else { "0".to_string() },
+            LLVMValue::ConstI8(v) => v.to_string(),
             LLVMValue::ConstI32(v) => v.to_string(),
             LLVMValue::ConstI64(v) => v.to_string(),
             LLVMValue::ConstDouble(v) => {
@@ -217,7 +220,10 @@ impl IRBuilder {
     }
 
     pub fn declare(&mut self, decl: &str) {
-        self.module.declarations.push(decl.to_string());
+        let decl_str = decl.to_string();
+        if !self.module.declarations.contains(&decl_str) {
+            self.module.declarations.push(decl_str);
+        }
     }
 
     pub fn next_reg_name(&mut self) -> String {

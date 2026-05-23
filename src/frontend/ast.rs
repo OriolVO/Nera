@@ -180,6 +180,10 @@ pub enum Expression {
     Index(Box<IndexExpr>),
     VariantConstruct(Box<VariantConstructExpr>),
     StructFieldAccess(Box<StructFieldAccessExpr>),
+    StringIndex(Box<StringIndexExpr>),
+    StringSlice(Box<StringSliceExpr>),
+    StringEq(Box<StringEqExpr>),
+    StringNotEq(Box<StringEqExpr>),
     Primary(PrimaryExpr),
 }
 
@@ -232,6 +236,7 @@ pub enum PrimaryExpr {
     Integer(i64),
     Float(f64),
     String(String),
+    Char(i64),
     Boolean(bool),
     ListLiteral(Vec<Spanned<Expression>>),
     NoneLiteral,
@@ -273,4 +278,26 @@ pub struct VectorSliceExpr {
 pub struct IndexExpr {
     pub target: Spanned<Expression>,
     pub index: Spanned<Expression>,
+}
+
+/// A string index, e.g. `str[0]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StringIndexExpr {
+    pub target: Spanned<Expression>,
+    pub index: Spanned<Expression>,
+}
+
+/// A string slice, e.g. `str[0..5]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StringSliceExpr {
+    pub target: Spanned<Expression>,
+    pub start: Option<Spanned<Expression>>,
+    pub end: Option<Spanned<Expression>>,
+}
+
+/// A string equality check, e.g. `str1 == str2`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StringEqExpr {
+    pub left: Spanned<Expression>,
+    pub right: Spanned<Expression>,
 }

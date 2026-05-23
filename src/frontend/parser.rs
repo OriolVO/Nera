@@ -908,6 +908,10 @@ impl<'a> Parser<'a> {
                 self.advance();
                 PrimaryExpr::String(val)
             }
+            TokenKind::Char(val) => {
+                self.advance();
+                PrimaryExpr::Char(val)
+            }
             TokenKind::True => {
                 self.advance();
                 PrimaryExpr::Boolean(true)

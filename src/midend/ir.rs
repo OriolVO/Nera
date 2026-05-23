@@ -8,6 +8,7 @@ pub enum IROperand {
     LiteralInt(i64),
     LiteralFloat(f64),
     LiteralString(String),
+    LiteralChar(i64),
     LiteralBool(bool),
     Variable(String),
     TempReg(usize),
@@ -64,6 +65,9 @@ pub enum IRInstruction {
     StoreStructField(IROperand, usize, IROperand), // struct_ptr, field_index, value
     LoadArrayElement(IROperand, String, String, IROperand, i64), // dest, array, prop, index, capacity
     StoreArrayElement(String, String, IROperand, IROperand, i64), // array, prop, index, value, capacity
+    LoadStringChar(IROperand, IROperand, IROperand), // dest, string_ptr, index
+    Substring(IROperand, IROperand, IROperand, IROperand), // dest, string_ptr, start, end
+    StringCompare(IROperand, IROperand, IROperand, bool), // dest, left, right, is_eq
 }
 
 pub struct IRGenerator {
@@ -581,6 +585,7 @@ impl IRGenerator {
                     PrimaryExpr::Integer(val) => IROperand::LiteralInt(*val),
                     PrimaryExpr::Float(val) => IROperand::LiteralFloat(*val),
                     PrimaryExpr::String(val) => IROperand::LiteralString(val.clone()),
+                    PrimaryExpr::Char(val) => IROperand::LiteralChar(*val),
                     PrimaryExpr::Boolean(val) => IROperand::LiteralBool(*val),
                     PrimaryExpr::Identifier(name) => IROperand::Variable(name.clone()),
                     PrimaryExpr::Grouped(inner) => self.generate_expression(inner),
@@ -730,6 +735,45 @@ impl IRGenerator {
                         ));
                     }
                 }
+                dest
+            }
+            Expression::StringIndex(str_idx) => {
+                let str_op = self.generate_expression(&str_idx.target);
+                let idx_op = self.generate_expression(&str_idx.index);
+                let dest = self.new_temp();
+                self.emit(IRInstruction::LoadStringChar(dest.clone(), str_op, idx_op));
+                dest
+            }
+            Expression::StringSlice(str_slice) => {
+                let str_op = self.generate_expression(&str_slice.target);
+                let start_op = if let Some(start) = &str_slice.start {
+                    self.generate_expression(start)
+                } else {
+                    IROperand::LiteralInt(0)
+                };
+                let end_op = if let Some(end) = &str_slice.end {
+                    self.generate_expression(end)
+                } else {
+                    // We assume it's passed a length, but standard doesn't support 'end' natively here easily without `strlen`.
+                    // It's handled in the backend generation. We pass a special literal to denote 'end' if missing.
+                    IROperand::LiteralInt(-1)
+                };
+                let dest = self.new_temp();
+                self.emit(IRInstruction::Substring(dest.clone(), str_op, start_op, end_op));
+                dest
+            }
+            Expression::StringEq(str_eq) => {
+                let left_op = self.generate_expression(&str_eq.left);
+                let right_op = self.generate_expression(&str_eq.right);
+                let dest = self.new_temp();
+                self.emit(IRInstruction::StringCompare(dest.clone(), left_op, right_op, true));
+                dest
+            }
+            Expression::StringNotEq(str_eq) => {
+                let left_op = self.generate_expression(&str_eq.left);
+                let right_op = self.generate_expression(&str_eq.right);
+                let dest = self.new_temp();
+                self.emit(IRInstruction::StringCompare(dest.clone(), left_op, right_op, false));
                 dest
             }
         }

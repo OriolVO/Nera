@@ -1,0 +1,35 @@
+use std.io
+
+fn main() -> Int {
+    let s1 = "hello"
+    let s2 = "hello"
+    let s3 = "world"
+
+    // Test string equality
+    if s1 == s2 {
+        puts("s1 == s2")
+    }
+    
+    if s1 != s3 {
+        puts("s1 != s3")
+    }
+
+    // Test char literal
+    let c: Char = 'e'
+    
+    // Test string indexing
+    let c2 = s1[1]
+
+    if c == c2 {
+        puts("c == c2")
+    }
+
+    // Test substring
+    let sub = s3[0..3] // "wor"
+    
+    if sub == "wor" {
+        puts("sub == wor")
+    }
+
+    return 0
+}

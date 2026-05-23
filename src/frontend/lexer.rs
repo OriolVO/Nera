@@ -21,11 +21,11 @@ pub enum TokenKind {
     And,
     Or,
 
-    // Identifiers and Literals
     Identifier(String),
     Integer(i64),
     Float(f64),
     String(String),
+    Char(i64),
 
     // Operators
     Assign,       // =
@@ -217,6 +217,22 @@ impl<'a> Lexer<'a> {
         TokenKind::String(string)
     }
 
+    /// Reads a character literal.
+    fn read_char(&mut self) -> TokenKind {
+        let Some(c) = self.advance() else {
+            return TokenKind::Error("Unterminated character literal".to_string());
+        };
+        
+        let val = c as i64;
+        
+        if self.peek() == Some(&'\'') {
+            self.advance(); // consume closing quote
+            TokenKind::Char(val)
+        } else {
+            TokenKind::Error("Expected closing quote for character literal".to_string())
+        }
+    }
+
     /// Retrieves the next token from the input stream.
     pub fn next_token(&mut self) -> Token {
         self.skip_whitespace();
@@ -337,6 +353,7 @@ impl<'a> Lexer<'a> {
                 }
             }
             '"' => self.read_string(),
+            '\'' => self.read_char(),
             _ if c.is_alphabetic() || c == '_' => self.read_identifier(c),
             _ if c.is_ascii_digit() => self.read_number(c),
             _ => TokenKind::Error(format!("Unexpected character: {}", c)),

@@ -153,6 +153,21 @@ fn process_simulation() {
 
 ---
 
+## Standard Library `std`
+
+Nera comes with a standard library to interface with the system.
+
+#### `std.io`
+- `printf(fmt: String, ...)`: Print formatted text.
+- `print_int(value: Int)`: Print an integer.
+- `print_float(value: Float)`: Print a float.
+- `puts(value: String)`: Print a string with a newline.
+
+#### `std.fs`
+- `read_file_to_string(path: String) -> ?String`: Reads an entire file into a dynamically allocated string, returning `None` if the file could not be opened.
+
+---
+
 ## CLI Compiler Driver
 
 Nera ships with a unified Command-Line Interface (CLI) capable of compiling into LLVM IR natively, or executing your programs immediately via a "smart cleanup" mechanism that utilizes the system's `clang`.
@@ -277,11 +292,12 @@ WhenPattern     ::= "None"                                             /* nullab
 /* --- LITERALS --- */
 
 ListLiteral     ::= "[" ArgumentList? "]"
-Literal         ::= Integer | Float | String | Boolean | NoneLiteral
+Literal         ::= Integer | Float | String | Char | Boolean | NoneLiteral
 NoneLiteral     ::= "None"
 Integer         ::= [0-9]+
 Float           ::= [0-9]+ "." [0-9]+
 String          ::= '"' [^"]* '"'
+Char            ::= "'" [^'] "'"
 Boolean         ::= "true" | "false"
 
 
