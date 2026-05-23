@@ -1,0 +1,14 @@
+// test_env.nera
+use std.env
+use std.io
+
+fn main() {
+    let argc = get_arg_count()
+    
+    // 1 (the binary itself) + 1 (the dummy argument passed in run_tests.sh) = 2
+    if argc == 2 {
+        print(1)
+    } else {
+        print(0)
+    }
+}

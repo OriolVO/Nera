@@ -8,19 +8,29 @@ pub enum TokenKind {
     Fn,
     Let,
     Mut,
+    // Control flow
     If,
     Else,
     While,
     Return,
+    When,
+    Break,
+    Continue,
+
     Use,
     Extern,
     True,
     False,
     Choice,
-    When,
     And,
     Or,
     Not,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    As,
 
     Identifier(String),
     Integer(i64),
@@ -44,6 +54,7 @@ pub enum TokenKind {
     Sub,          // -
     Mul,          // *
     Div,          // /
+    Mod,          // %
     Pipe,         // >>
     Arrow,        // ->
     Caret,        // ^
@@ -157,18 +168,26 @@ impl<'a> Lexer<'a> {
             "else" => TokenKind::Else,
             "while" => TokenKind::While,
             "return" => TokenKind::Return,
+            "when" => TokenKind::When,
+            "break" => TokenKind::Break,
+            "continue" => TokenKind::Continue,
             "use" => TokenKind::Use,
             "extern" => TokenKind::Extern,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "choice" => TokenKind::Choice,
-            "when" => TokenKind::When,
             "alloc" => TokenKind::Alloc,
             "free" => TokenKind::Free,
             "None" => TokenKind::NoneLiteral,
             "and" => TokenKind::And,
             "or" => TokenKind::Or,
             "not" => TokenKind::Not,
+            "bitand" => TokenKind::BitAnd,
+            "bitor" => TokenKind::BitOr,
+            "bitxor" => TokenKind::BitXor,
+            "shl" => TokenKind::Shl,
+            "shr" => TokenKind::Shr,
+            "as" => TokenKind::As,
             _ => TokenKind::Identifier(ident),
         }
     }
@@ -214,7 +233,24 @@ impl<'a> Lexer<'a> {
             if c == '"' {
                 break;
             }
-            string.push(c);
+            if c == '\\' {
+                if let Some(esc) = self.advance() {
+                    match esc {
+                        'n' => string.push('\n'),
+                        'r' => string.push('\r'),
+                        't' => string.push('\t'),
+                        '\\' => string.push('\\'),
+                        '"' => string.push('"'),
+                        '\'' => string.push('\''),
+                        '0' => string.push('\0'),
+                        _ => return TokenKind::Error(format!("Invalid escape sequence \\{}", esc)),
+                    }
+                } else {
+                    return TokenKind::Error("Unterminated escape sequence".to_string());
+                }
+            } else {
+                string.push(c);
+            }
         }
 
         TokenKind::String(string)
@@ -226,7 +262,24 @@ impl<'a> Lexer<'a> {
             return TokenKind::Error("Unterminated character literal".to_string());
         };
         
-        let val = c as i64;
+        let val = if c == '\\' {
+            if let Some(esc) = self.advance() {
+                match esc {
+                    'n' => '\n' as i64,
+                    'r' => '\r' as i64,
+                    't' => '\t' as i64,
+                    '\\' => '\\' as i64,
+                    '"' => '"' as i64,
+                    '\'' => '\'' as i64,
+                    '0' => '\0' as i64,
+                    _ => return TokenKind::Error(format!("Invalid escape sequence \\{}", esc)),
+                }
+            } else {
+                return TokenKind::Error("Unterminated escape sequence".to_string());
+            }
+        } else {
+            c as i64
+        };
         
         if self.peek() == Some(&'\'') {
             self.advance(); // consume closing quote
@@ -328,6 +381,7 @@ impl<'a> Lexer<'a> {
                     TokenKind::Mul
                 }
             }
+            '%' => TokenKind::Mod,
             '<' => {
                 if let Some(&'=') = self.peek() {
                     self.advance();

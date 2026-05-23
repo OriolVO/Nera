@@ -34,8 +34,13 @@ for file in tests/*.nera; do
             FAILED=$((FAILED + 1))
         fi
     else
-        # For all other tests, we expect them to compile and run successfully
-        output=$(cargo run -q -- run "$file" 2>&1)
+        # Pass a dummy argument specifically to test_env.nera
+        if [[ "$file" == *"test_env.nera" ]]; then
+            output=$(cargo run -q -- run "$file" "dummy_arg" 2>&1)
+        else
+            output=$(cargo run -q -- run "$file" 2>&1)
+        fi
+        
         if [ $? -eq 0 ]; then
             echo -e "${GREEN}PASSED${NC}"
             PASSED=$((PASSED + 1))

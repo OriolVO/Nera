@@ -69,6 +69,7 @@ pub enum IRInstruction {
     LoadStringChar(IROperand, IROperand, IROperand), // dest, string_ptr, index
     Substring(IROperand, IROperand, IROperand, IROperand), // dest, string_ptr, start, end
     StringCompare(IROperand, IROperand, IROperand, bool), // dest, left, right, is_eq
+    Cast(IROperand, String, IROperand), // dest, target_type, src
 }
 
 pub struct IRGenerator {
@@ -79,7 +80,8 @@ pub struct IRGenerator {
     label_count: usize,
     data_structs: HashMap<String, Vec<String>>,
     array_params: HashMap<String, String>, // Tracks array param variables to their type name
-    array_sizes: HashMap<String, i64>, // Tracks dynamic array sizes
+    pub array_sizes: HashMap<String, i64>, // Tracks dynamic array sizes
+    pub loop_labels: Vec<(String, String)>, // (start_label, end_label)
     pub choice_tags: HashMap<String, HashMap<String, i64>>, // ChoiceName -> VariantName -> Tag
     pub global_instructions: Vec<IRInstruction>, // for global vars, but we can just use main or init
 }
@@ -95,6 +97,7 @@ impl IRGenerator {
             data_structs: HashMap::new(),
             array_params: HashMap::new(),
             array_sizes: HashMap::new(),
+            loop_labels: Vec::new(),
             choice_tags: HashMap::new(),
             global_instructions: Vec::new(),
         }
@@ -448,10 +451,26 @@ impl IRGenerator {
                 self.finish_block(Terminator::Branch(cond_val, loop_body.clone(), loop_end.clone()));
                 
                 self.start_block(loop_body);
+                self.loop_labels.push((loop_cond.clone(), loop_end.clone()));
                 self.generate_block(&while_stmt.block);
+                self.loop_labels.pop();
                 self.finish_block(Terminator::Jump(loop_cond));
                 
                 self.start_block(loop_end);
+            }
+            Statement::Break => {
+                if let Some((_, end_label)) = self.loop_labels.last() {
+                    self.finish_block(Terminator::Jump(end_label.clone()));
+                    let unreachable_lbl = self.new_label("unreachable");
+                    self.start_block(unreachable_lbl);
+                }
+            }
+            Statement::Continue => {
+                if let Some((cond_label, _)) = self.loop_labels.last() {
+                    self.finish_block(Terminator::Jump(cond_label.clone()));
+                    let unreachable_lbl = self.new_label("unreachable");
+                    self.start_block(unreachable_lbl);
+                }
             }
             Statement::Return(return_stmt) => {
                 let val_opt = return_stmt.value.as_ref().map(|v| self.generate_expression(v));
@@ -520,6 +539,13 @@ impl IRGenerator {
                     unary_expr.op.clone(),
                     operand,
                 ));
+                dest
+            }
+            Expression::Cast(cast_expr) => {
+                let src = self.generate_expression(&cast_expr.expr);
+                let target_type = cast_expr.target_type.node.to_string();
+                let dest = self.new_temp();
+                self.emit(IRInstruction::Cast(dest.clone(), target_type, src));
                 dest
             }
             Expression::Property(prop_access) => {

@@ -62,13 +62,18 @@ ExprStmt        ::= Expression
 Expression      ::= PipeExpr
 
 PipeExpr        ::= LogicalExpr (">>" LogicalExpr)*
-LogicalExpr     ::= EqualityExpr (("and" | "or") EqualityExpr)*
+LogicalExpr     ::= BitwiseOrExpr (("and" | "or") BitwiseOrExpr)*
+BitwiseOrExpr   ::= BitwiseXorExpr ("bitor" BitwiseXorExpr)*
+BitwiseXorExpr  ::= BitwiseAndExpr ("bitxor" BitwiseAndExpr)*
+BitwiseAndExpr  ::= EqualityExpr ("bitand" EqualityExpr)*
 EqualityExpr    ::= RelationalExpr (("==" | "!=") RelationalExpr)*
-RelationalExpr  ::= AdditiveExpr (("<" | "<=" | ">" | ">=") AdditiveExpr)*
+RelationalExpr  ::= ShiftExpr (("<" | "<=" | ">" | ">=") ShiftExpr)*
+ShiftExpr       ::= AdditiveExpr (("shl" | "shr") AdditiveExpr)*
 AdditiveExpr    ::= MultiplicativeExpr (("+" | "-") MultiplicativeExpr)*
-MultiplicativeExpr ::= UnaryExpr (("*" | "/") UnaryExpr)*
+MultiplicativeExpr ::= UnaryExpr (("*" | "/" | "%") UnaryExpr)*
 
-UnaryExpr       ::= ("-" | "not")* PostfixExpr
+UnaryExpr       ::= ("-" | "not")* CastExpr
+CastExpr        ::= PostfixExpr ("as" Type)*
 /* Postfix operators (left-associative, chained in a loop):
      expr.field          – field / property access
      expr.method(args)   – method-style call (desugared to free fn call in sema)

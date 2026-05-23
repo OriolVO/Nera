@@ -132,6 +132,8 @@ pub enum Statement {
     Return(ReturnStmt),
     Expr(Spanned<Expression>),
     Free(Spanned<Expression>),
+    Break,
+    Continue,
 }
 
 /// A variable declaration, e.g. `let x: Int = 5` or `mut y = 10`
@@ -214,9 +216,16 @@ pub enum Expression {
     StringSlice(Box<StringSliceExpr>),
     StringEq(Box<StringEqExpr>),
     StringNotEq(Box<StringEqExpr>),
+    Cast(Box<CastExpr>),
     Primary(PrimaryExpr),
 }
 
+/// An explicit type cast expression (expr as Type).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CastExpr {
+    pub expr: Spanned<Expression>,
+    pub target_type: Spanned<Type>,
+}
 
 /// A when expression for pattern matching.
 #[derive(Debug, Clone, PartialEq)]
@@ -267,10 +276,12 @@ pub enum UnaryOp {
 pub enum BinaryOp {
     Pipe, // >>
     And, Or,
+    BitAnd, BitOr, BitXor,
+    Shl, Shr,
     Eq, NotEq,
     Lt, LtEq, Gt, GtEq,
     Add, Sub,
-    Mul, Div,
+    Mul, Div, Mod,
 }
 
 /// A primary expression (the leaves of the expression tree).

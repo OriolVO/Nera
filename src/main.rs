@@ -22,7 +22,7 @@ fn print_usage() {
     println!("  nera run <file.nera>       Compile and execute");
 }
 
-fn run_compiler(command: &str, filename: &str) -> Result<(), CompileError> {
+fn run_compiler(command: &str, filename: &str, program_args: &[String]) -> Result<(), CompileError> {
 
     let source = fs::read_to_string(filename)?;
 
@@ -142,7 +142,11 @@ fn run_compiler(command: &str, filename: &str) -> Result<(), CompileError> {
         let _ = fs::remove_file(&ll_filename);
 
         // Execute the binary natively
-        let run_status = process::Command::new(format!("./{}", bin_filename)).status();
+        let mut cmd = process::Command::new(format!("./{}", bin_filename));
+        for arg in program_args {
+            cmd.arg(arg);
+        }
+        let run_status = cmd.status();
             
         match run_status {
             Ok(status) => {
@@ -174,7 +178,13 @@ fn main() {
         process::exit(1);
     }
 
-    match run_compiler(command, filename) {
+    let program_args = if args.len() > 3 {
+        &args[3..]
+    } else {
+        &[]
+    };
+
+    match run_compiler(command, filename, program_args) {
         Ok(_) => {
             if command == "compile" {
                 println!("Successfully compiled.");

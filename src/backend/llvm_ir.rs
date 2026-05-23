@@ -101,14 +101,19 @@ pub enum LLVMInstruction {
     Mul(String, LLVMType, LLVMValue, LLVMValue),
     FMul(String, LLVMType, LLVMValue, LLVMValue),
     SDiv(String, LLVMType, LLVMValue, LLVMValue),
+    SRem(String, LLVMType, LLVMValue, LLVMValue),
     FDiv(String, LLVMType, LLVMValue, LLVMValue),
     ICmp(String, String, LLVMType, LLVMValue, LLVMValue), // dest, pred
     FCmp(String, String, LLVMType, LLVMValue, LLVMValue),
     And(String, LLVMType, LLVMValue, LLVMValue),
     Or(String, LLVMType, LLVMValue, LLVMValue),
     Xor(String, LLVMType, LLVMValue, LLVMValue),
+    Shl(String, LLVMType, LLVMValue, LLVMValue),
+    AShr(String, LLVMType, LLVMValue, LLVMValue),
     ZExt(String, LLVMType, LLVMValue, LLVMType), // dest, dest_ty, val, src_ty
     Trunc(String, LLVMType, LLVMValue, LLVMType),
+    SIToFP(String, LLVMType, LLVMValue, LLVMType),
+    FPToSI(String, LLVMType, LLVMValue, LLVMType),
     BitCast(String, LLVMType, LLVMValue, LLVMType),
     IntToPtr(String, LLVMType, LLVMValue, LLVMType),
     PtrToInt(String, LLVMType, LLVMValue, LLVMType),
@@ -145,14 +150,19 @@ impl LLVMInstruction {
             LLVMInstruction::Mul(dest, ty, l, r) => format!("  %{} = mul nsw {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
             LLVMInstruction::FMul(dest, ty, l, r) => format!("  %{} = fmul {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
             LLVMInstruction::SDiv(dest, ty, l, r) => format!("  %{} = sdiv {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
+            LLVMInstruction::SRem(dest, ty, l, r) => format!("  %{} = srem {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
             LLVMInstruction::FDiv(dest, ty, l, r) => format!("  %{} = fdiv {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
             LLVMInstruction::ICmp(dest, pred, ty, l, r) => format!("  %{} = icmp {} {} {}, {}", dest, pred, ty.to_string(), l.to_string(), r.to_string()),
             LLVMInstruction::FCmp(dest, pred, ty, l, r) => format!("  %{} = fcmp {} {} {}, {}", dest, pred, ty.to_string(), l.to_string(), r.to_string()),
             LLVMInstruction::And(dest, ty, l, r) => format!("  %{} = and {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
             LLVMInstruction::Or(dest, ty, l, r) => format!("  %{} = or {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
             LLVMInstruction::Xor(dest, ty, l, r) => format!("  %{} = xor {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
+            LLVMInstruction::Shl(dest, ty, l, r) => format!("  %{} = shl {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
+            LLVMInstruction::AShr(dest, ty, l, r) => format!("  %{} = ashr {} {}, {}", dest, ty.to_string(), l.to_string(), r.to_string()),
             LLVMInstruction::ZExt(dest, dest_ty, val, _src_ty) => format!("  %{} = zext {} to {}", dest, val.typed_string(), dest_ty.to_string()),
             LLVMInstruction::Trunc(dest, dest_ty, val, _src_ty) => format!("  %{} = trunc {} to {}", dest, val.typed_string(), dest_ty.to_string()),
+            LLVMInstruction::SIToFP(dest, dest_ty, val, _src_ty) => format!("  %{} = sitofp {} to {}", dest, val.typed_string(), dest_ty.to_string()),
+            LLVMInstruction::FPToSI(dest, dest_ty, val, _src_ty) => format!("  %{} = fptosi {} to {}", dest, val.typed_string(), dest_ty.to_string()),
             LLVMInstruction::BitCast(dest, dest_ty, val, _src_ty) => format!("  %{} = bitcast {} to {}", dest, val.typed_string(), dest_ty.to_string()),
             LLVMInstruction::IntToPtr(dest, dest_ty, val, _src_ty) => format!("  %{} = inttoptr {} to {}", dest, val.typed_string(), dest_ty.to_string()),
             LLVMInstruction::PtrToInt(dest, dest_ty, val, _src_ty) => format!("  %{} = ptrtoint {} to {}", dest, val.typed_string(), dest_ty.to_string()),
@@ -376,6 +386,13 @@ impl IRBuilder {
         LLVMValue::Reg(dest, ty)
     }
 
+    pub fn build_srem(&mut self, l: LLVMValue, r: LLVMValue) -> LLVMValue {
+        let dest = self.next_reg_name();
+        let ty = l.get_type();
+        self.push_instr(LLVMInstruction::SRem(dest.clone(), ty.clone(), l, r));
+        LLVMValue::Reg(dest, ty)
+    }
+
     pub fn build_fdiv(&mut self, l: LLVMValue, r: LLVMValue) -> LLVMValue {
         let dest = self.next_reg_name();
         let ty = l.get_type();
@@ -418,6 +435,20 @@ impl IRBuilder {
         LLVMValue::Reg(dest, ty)
     }
 
+    pub fn build_shl(&mut self, l: LLVMValue, r: LLVMValue) -> LLVMValue {
+        let dest = self.next_reg_name();
+        let ty = l.get_type();
+        self.push_instr(LLVMInstruction::Shl(dest.clone(), ty.clone(), l, r));
+        LLVMValue::Reg(dest, ty)
+    }
+
+    pub fn build_ashr(&mut self, l: LLVMValue, r: LLVMValue) -> LLVMValue {
+        let dest = self.next_reg_name();
+        let ty = l.get_type();
+        self.push_instr(LLVMInstruction::AShr(dest.clone(), ty.clone(), l, r));
+        LLVMValue::Reg(dest, ty)
+    }
+
     pub fn build_fneg(&mut self, val: LLVMValue) -> LLVMValue {
         let zero = LLVMValue::ConstDouble(0.0);
         self.build_fsub(zero, val)
@@ -427,6 +458,20 @@ impl IRBuilder {
         let dest = self.next_reg_name();
         let src_ty = val.get_type();
         self.push_instr(LLVMInstruction::ZExt(dest.clone(), dest_ty.clone(), val, src_ty));
+        LLVMValue::Reg(dest, dest_ty)
+    }
+
+    pub fn build_sitofp(&mut self, val: LLVMValue, dest_ty: LLVMType) -> LLVMValue {
+        let dest = self.next_reg_name();
+        let src_ty = val.get_type();
+        self.push_instr(LLVMInstruction::SIToFP(dest.clone(), dest_ty.clone(), val, src_ty));
+        LLVMValue::Reg(dest, dest_ty)
+    }
+
+    pub fn build_fptosi(&mut self, val: LLVMValue, dest_ty: LLVMType) -> LLVMValue {
+        let dest = self.next_reg_name();
+        let src_ty = val.get_type();
+        self.push_instr(LLVMInstruction::FPToSI(dest.clone(), dest_ty.clone(), val, src_ty));
         LLVMValue::Reg(dest, dest_ty)
     }
 

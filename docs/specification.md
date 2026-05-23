@@ -105,3 +105,37 @@ if not is_far and has_mana {
     // ...
 }
 ```
+
+## 7. Modulo and Bitwise Operators
+Nera supports arithmetic modulo and explicit bitwise operations. To maintain Nera's philosophy of eliminating line noise and aligning with English logical keywords (`and`, `or`, `not`), bitwise operators are represented as text keywords rather than symbols.
+
+### 7.1 Modulo (`%`)
+The `%` operator computes the remainder of an integer division. It is restricted to `Int` types.
+```nera
+let index = hash % capacity
+```
+
+### 7.2 Bitwise Operators
+Bitwise operators perform low-level bit manipulation and strictly require `Int` operands. They are typically used for masks, flags, and memory addresses.
+- **Bitwise AND**: `bitand`
+- **Bitwise OR**: `bitor`
+- **Bitwise XOR**: `bitxor`
+- **Shift Left**: `shl`
+- **Shift Right**: `shr`
+
+```nera
+let flags = flag1 bitor flag2
+let is_set = (flags bitand mask) != 0
+let shifted = value shl 2
+```
+
+## 8. Explicit Type Casting
+Nera provides the `as` operator for explicit type conversions. To maintain Nera's philosophy of making expensive operations explicit, the `as` keyword is strictly limited to primitive scalar types (`Int`, `Float`, `Char`, `Boolean`) that compile down to simple CPU instructions.
+
+```nera
+let index = (time * speed) as Int
+let is_valid = flags as Boolean
+let val = ('7' as Int) - ('0' as Int)
+```
+
+Attempting to cast complex types like `String`, `List`, or custom structs using `as` will result in a compile-time error. Complex conversions (e.g., parsing a string to an integer) must be performed using standard library functions to explicitly show the overhead of parsing loops and potential heap allocations.

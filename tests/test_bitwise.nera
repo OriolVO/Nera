@@ -1,0 +1,49 @@
+// test_bitwise.nera
+use std.io
+
+fn main() {
+    let a = 15 // 1111
+    let b = 9  // 1001
+
+    // Modulo
+    if a % 4 == 3 {
+        print(1)
+    } else {
+        print(0)
+    }
+
+    // Bitwise AND
+    if (a bitand b) == 9 {
+        print(1)
+    } else {
+        print(0)
+    }
+
+    // Bitwise OR
+    if (a bitor b) == 15 {
+        print(1)
+    } else {
+        print(0)
+    }
+
+    // Bitwise XOR
+    if (a bitxor b) == 6 { // 1111 ^ 1001 = 0110 (6)
+        print(1)
+    } else {
+        print(0)
+    }
+
+    // Shift Left
+    if (b shl 2) == 36 { // 1001 << 2 = 100100 (36)
+        print(1)
+    } else {
+        print(0)
+    }
+
+    // Shift Right
+    if (a shr 2) == 3 { // 1111 >> 2 = 0011 (3)
+        print(1)
+    } else {
+        print(0)
+    }
+}

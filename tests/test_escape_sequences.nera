@@ -1,0 +1,30 @@
+// test_escape_sequences.nera
+use std.io
+
+fn main() {
+    let s = "Hello\nWorld\t\"Nera\"\\"
+    let c1 = '\n'
+    let c2 = '\''
+    let c3 = '\\'
+
+    // 'Hello\nWorld\t"Nera"\'
+    // Let's just print something to verify it compiles and runs without issues
+    
+    if c1 == 10 {
+        print(1)
+    } else {
+        print(0)
+    }
+
+    if c2 == 39 {
+        print(1)
+    } else {
+        print(0)
+    }
+
+    if c3 == 92 {
+        print(1)
+    } else {
+        print(0)
+    }
+}

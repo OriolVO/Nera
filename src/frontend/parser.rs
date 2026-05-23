@@ -518,6 +518,14 @@ impl<'a> Parser<'a> {
             TokenKind::If => Statement::If(self.parse_if_stmt()?),
             TokenKind::While => Statement::While(self.parse_while_stmt()?),
             TokenKind::Return => Statement::Return(self.parse_return_stmt()?),
+            TokenKind::Break => {
+                self.advance();
+                Statement::Break
+            },
+            TokenKind::Continue => {
+                self.advance();
+                Statement::Continue
+            },
             TokenKind::Free => Statement::Free(self.parse_free_stmt()?),
             _ => {
                 let expr = self.parse_expression()?;
@@ -658,7 +666,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_logical_expr(&mut self) -> Option<Spanned<Expression>> {
-        let mut left = self.parse_equality_expr()?;
+        let mut left = self.parse_bitwise_or_expr()?;
 
         while self.current_token.kind == TokenKind::And || self.current_token.kind == TokenKind::Or {
             let op = match self.current_token.kind {
@@ -667,7 +675,7 @@ impl<'a> Parser<'a> {
                 _ => unreachable!(),
             };
             self.advance();
-            let right = self.parse_equality_expr()?;
+            let right = self.parse_bitwise_or_expr()?;
             let span = left.span.merge(&right.span);
             left = Spanned::new(Expression::Binary(Box::new(BinaryExpr {
                 left,
@@ -676,6 +684,51 @@ impl<'a> Parser<'a> {
             })), span);
         }
 
+        Some(left)
+    }
+
+    fn parse_bitwise_or_expr(&mut self) -> Option<Spanned<Expression>> {
+        let mut left = self.parse_bitwise_xor_expr()?;
+        while self.current_token.kind == TokenKind::BitOr {
+            self.advance();
+            let right = self.parse_bitwise_xor_expr()?;
+            let span = left.span.merge(&right.span);
+            left = Spanned::new(Expression::Binary(Box::new(BinaryExpr {
+                left,
+                op: BinaryOp::BitOr,
+                right,
+            })), span);
+        }
+        Some(left)
+    }
+
+    fn parse_bitwise_xor_expr(&mut self) -> Option<Spanned<Expression>> {
+        let mut left = self.parse_bitwise_and_expr()?;
+        while self.current_token.kind == TokenKind::BitXor {
+            self.advance();
+            let right = self.parse_bitwise_and_expr()?;
+            let span = left.span.merge(&right.span);
+            left = Spanned::new(Expression::Binary(Box::new(BinaryExpr {
+                left,
+                op: BinaryOp::BitXor,
+                right,
+            })), span);
+        }
+        Some(left)
+    }
+
+    fn parse_bitwise_and_expr(&mut self) -> Option<Spanned<Expression>> {
+        let mut left = self.parse_equality_expr()?;
+        while self.current_token.kind == TokenKind::BitAnd {
+            self.advance();
+            let right = self.parse_equality_expr()?;
+            let span = left.span.merge(&right.span);
+            left = Spanned::new(Expression::Binary(Box::new(BinaryExpr {
+                left,
+                op: BinaryOp::BitAnd,
+                right,
+            })), span);
+        }
         Some(left)
     }
 
@@ -702,7 +755,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_relational_expr(&mut self) -> Option<Spanned<Expression>> {
-        let mut left = self.parse_additive_expr()?;
+        let mut left = self.parse_shift_expr()?;
 
         while matches!(self.current_token.kind, TokenKind::Lt | TokenKind::LtEq | TokenKind::Gt | TokenKind::GtEq) {
             let op = match self.current_token.kind {
@@ -710,6 +763,27 @@ impl<'a> Parser<'a> {
                 TokenKind::LtEq => BinaryOp::LtEq,
                 TokenKind::Gt => BinaryOp::Gt,
                 TokenKind::GtEq => BinaryOp::GtEq,
+                _ => unreachable!(),
+            };
+            self.advance();
+            let right = self.parse_shift_expr()?;
+            let span = left.span.merge(&right.span);
+            left = Spanned::new(Expression::Binary(Box::new(BinaryExpr {
+                left,
+                op,
+                right,
+            })), span);
+        }
+
+        Some(left)
+    }
+
+    fn parse_shift_expr(&mut self) -> Option<Spanned<Expression>> {
+        let mut left = self.parse_additive_expr()?;
+        while self.current_token.kind == TokenKind::Shl || self.current_token.kind == TokenKind::Shr {
+            let op = match self.current_token.kind {
+                TokenKind::Shl => BinaryOp::Shl,
+                TokenKind::Shr => BinaryOp::Shr,
                 _ => unreachable!(),
             };
             self.advance();
@@ -721,7 +795,6 @@ impl<'a> Parser<'a> {
                 right,
             })), span);
         }
-
         Some(left)
     }
 
@@ -750,10 +823,11 @@ impl<'a> Parser<'a> {
     fn parse_multiplicative_expr(&mut self) -> Option<Spanned<Expression>> {
         let mut left = self.parse_unary_expr()?;
 
-        while self.current_token.kind == TokenKind::Mul || self.current_token.kind == TokenKind::Div {
+        while self.current_token.kind == TokenKind::Mul || self.current_token.kind == TokenKind::Div || self.current_token.kind == TokenKind::Mod {
             let op = match self.current_token.kind {
                 TokenKind::Mul => BinaryOp::Mul,
                 TokenKind::Div => BinaryOp::Div,
+                TokenKind::Mod => BinaryOp::Mod,
                 _ => unreachable!(),
             };
             self.advance();
@@ -786,7 +860,27 @@ impl<'a> Parser<'a> {
             })), span));
         }
 
-        self.parse_postfix_expr()
+        self.parse_cast_expr()
+    }
+
+    fn parse_cast_expr(&mut self) -> Option<Spanned<Expression>> {
+        let mut left = self.parse_postfix_expr()?;
+
+        while self.current_token.kind == TokenKind::As {
+            self.advance();
+            if let Some(target_type) = self.parse_type() {
+                let span = left.span.merge(&target_type.span);
+                left = Spanned::new(Expression::Cast(Box::new(CastExpr {
+                    expr: left,
+                    target_type,
+                })), span);
+            } else {
+                self.report_error(&self.current_token.span.clone(), "Expected a valid type after 'as'");
+                return None;
+            }
+        }
+        
+        Some(left)
     }
 
     fn parse_postfix_expr(&mut self) -> Option<Spanned<Expression>> {

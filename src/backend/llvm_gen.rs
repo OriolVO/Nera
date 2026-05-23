@@ -29,6 +29,16 @@ impl LLVMGenerator {
         }
     }
 
+    fn str_to_llvm_type(&self, ty_str: &str) -> LLVMType {
+        match ty_str {
+            "Int" | "Char" => LLVMType::I64,
+            "Float" => LLVMType::Double,
+            "Boolean" => LLVMType::I1,
+            "String" => LLVMType::Pointer(Box::new(LLVMType::I8)),
+            _ => LLVMType::Pointer(Box::new(LLVMType::I8)), // fallback for pointers
+        }
+    }
+
     fn type_to_llvm(&self, nera_ty: &TypeInfo) -> LLVMType {
         match nera_ty {
             TypeInfo::Int => LLVMType::I64,
@@ -193,7 +203,10 @@ impl LLVMGenerator {
             }
         }
 
-        let sanitized_name = func.name.replace("(", "_").replace(")", "").replace(", ", "_");
+        let mut sanitized_name = func.name.replace("(", "_").replace(")", "").replace(", ", "_");
+        if func.name == "main" {
+            sanitized_name = "nera_main".to_string();
+        }
 
         if func.is_extern {
             let param_strs: Vec<String> = params.iter().map(|(_, t)| t.to_string()).collect();
@@ -398,14 +411,18 @@ impl LLVMGenerator {
                     BinaryOp::Sub => if is_float { self.builder.build_fsub(l_val, r_val) } else { self.builder.build_sub(l_val, r_val) },
                     BinaryOp::Mul => if is_float { self.builder.build_fmul(l_val, r_val) } else { self.builder.build_mul(l_val, r_val) },
                     BinaryOp::Div => if is_float { self.builder.build_fdiv(l_val, r_val) } else { self.builder.build_sdiv(l_val, r_val) },
+                    BinaryOp::Mod => self.builder.build_srem(l_val, r_val),
                     BinaryOp::Eq => if is_float { self.builder.build_fcmp("oeq", l_val, r_val) } else { self.builder.build_icmp("eq", l_val, r_val) },
                     BinaryOp::NotEq => if is_float { self.builder.build_fcmp("one", l_val, r_val) } else { self.builder.build_icmp("ne", l_val, r_val) },
                     BinaryOp::Lt => if is_float { self.builder.build_fcmp("olt", l_val, r_val) } else { self.builder.build_icmp("slt", l_val, r_val) },
                     BinaryOp::LtEq => if is_float { self.builder.build_fcmp("ole", l_val, r_val) } else { self.builder.build_icmp("sle", l_val, r_val) },
                     BinaryOp::Gt => if is_float { self.builder.build_fcmp("ogt", l_val, r_val) } else { self.builder.build_icmp("sgt", l_val, r_val) },
                     BinaryOp::GtEq => if is_float { self.builder.build_fcmp("oge", l_val, r_val) } else { self.builder.build_icmp("sge", l_val, r_val) },
-                    BinaryOp::And => self.builder.build_and(l_val, r_val),
-                    BinaryOp::Or => self.builder.build_or(l_val, r_val),
+                    BinaryOp::And | BinaryOp::BitAnd => self.builder.build_and(l_val, r_val),
+                    BinaryOp::Or | BinaryOp::BitOr => self.builder.build_or(l_val, r_val),
+                    BinaryOp::BitXor => self.builder.build_xor(l_val, r_val),
+                    BinaryOp::Shl => self.builder.build_shl(l_val, r_val),
+                    BinaryOp::Shr => self.builder.build_ashr(l_val, r_val),
                     BinaryOp::Pipe => unreachable!(),
                 };
 
@@ -944,6 +961,24 @@ impl LLVMGenerator {
                 
                 if let IROperand::TempReg(t) = dest {
                     self.temp_map.insert(*t, bool_res);
+                }
+            }
+            IRInstruction::Cast(dest, target_type, src) => {
+                let src_val = self.operand_to_value(src)?;
+                let src_ty = src_val.get_type();
+                let dest_ty = self.str_to_llvm_type(target_type);
+
+                let casted_val = match (src_ty, dest_ty) {
+                    (LLVMType::I64, LLVMType::Double) => self.builder.build_sitofp(src_val, LLVMType::Double),
+                    (LLVMType::Double, LLVMType::I64) => self.builder.build_fptosi(src_val, LLVMType::I64),
+                    (LLVMType::I1, LLVMType::I64) => self.builder.build_zext(src_val, LLVMType::I64),
+                    (LLVMType::I64, LLVMType::I1) => self.builder.build_icmp("ne", src_val, LLVMValue::ConstI64(0)),
+                    (LLVMType::I64, LLVMType::I64) => src_val, // No-op
+                    _ => src_val, // Fallback
+                };
+
+                if let IROperand::TempReg(t) = dest {
+                    self.temp_map.insert(*t, casted_val);
                 }
             }
         }

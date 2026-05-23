@@ -131,6 +131,10 @@ impl IROptimizer {
                 add_use(operand);
                 add_def(dest);
             }
+            IRInstruction::Cast(dest, _, src) => {
+                add_use(src);
+                add_def(dest);
+            }
             IRInstruction::BinaryOp(dest, _, left, right) => {
                 add_use(left);
                 add_use(right);
