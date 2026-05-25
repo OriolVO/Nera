@@ -1,0 +1,2154 @@
+// compiler/frontend/parser.nera
+use compiler.frontend.lexer
+use compiler.frontend.ast
+use compiler.frontend.diagnostics
+
+data Parser {
+    lex: ^Lexer
+    current_token: ^Token
+    next_token: ^Token
+}
+
+fn alloc_parser(lex: ^Lexer) -> ^Parser {
+    mut p = alloc Parser()
+    p^.lex = lex
+    p^.current_token = next_token(lex)
+    p^.next_token = next_token(lex)
+    return p
+}
+
+fn advance_parser(mut p: ^Parser) -> Void {
+    p^.current_token = p^.next_token
+    p^.next_token = next_token(p^.lex)
+}
+
+fn report_error(p: ^Parser, span: ^Span, msg: String) -> Void {
+    print_diagnostic(p^.lex^.source, span, msg)
+}
+
+
+fn new_empty_expr_list() -> ^List(Spanned(Expression)) {
+    mut dummy = alloc Spanned(Expression)()
+    return new_list(2, dummy)
+}
+
+fn push_expr_list(list: ^List(Spanned(Expression)), expr: Spanned(Expression)) -> Void {
+    list_push(list, expr)
+}
+
+fn check_token(kind: TokenKind, target_str: String) -> Boolean {
+    when kind {
+
+        Data -> { if target_str == "Data" { return true } }
+        Fn -> { if target_str == "Fn" { return true } }
+        Let -> { if target_str == "Let" { return true } }
+        Mut -> { if target_str == "Mut" { return true } }
+        If -> { if target_str == "If" { return true } }
+        Else -> { if target_str == "Else" { return true } }
+        While -> { if target_str == "While" { return true } }
+        Return -> { if target_str == "Return" { return true } }
+        When -> { if target_str == "When" { return true } }
+        Break -> { if target_str == "Break" { return true } }
+        Continue -> { if target_str == "Continue" { return true } }
+        Use -> { if target_str == "Use" { return true } }
+        Extern -> { if target_str == "Extern" { return true } }
+        True -> { if target_str == "True" { return true } }
+        False -> { if target_str == "False" { return true } }
+        Choice -> { if target_str == "Choice" { return true } }
+        And -> { if target_str == "And" { return true } }
+        Or -> { if target_str == "Or" { return true } }
+        Not -> { if target_str == "Not" { return true } }
+        BitAnd -> { if target_str == "BitAnd" { return true } }
+        BitOr -> { if target_str == "BitOr" { return true } }
+        BitXor -> { if target_str == "BitXor" { return true } }
+        Shl -> { if target_str == "Shl" { return true } }
+        Shr -> { if target_str == "Shr" { return true } }
+        As -> { if target_str == "As" { return true } }
+        Identifier(val) -> { if target_str == "Identifier" { return true } }
+        Integer(val) -> { if target_str == "Integer" { return true } }
+        Float(val) -> { if target_str == "Float" { return true } }
+        StringLiteral(val) -> { if target_str == "StringLiteral" { return true } }
+        CharLiteral(val) -> { if target_str == "CharLiteral" { return true } }
+        Assign -> { if target_str == "Assign" { return true } }
+        AddAssign -> { if target_str == "AddAssign" { return true } }
+        SubAssign -> { if target_str == "SubAssign" { return true } }
+        MulAssign -> { if target_str == "MulAssign" { return true } }
+        DivAssign -> { if target_str == "DivAssign" { return true } }
+        Eq -> { if target_str == "Eq" { return true } }
+        NotEq -> { if target_str == "NotEq" { return true } }
+        Lt -> { if target_str == "Lt" { return true } }
+        LtEq -> { if target_str == "LtEq" { return true } }
+        Gt -> { if target_str == "Gt" { return true } }
+        GtEq -> { if target_str == "GtEq" { return true } }
+        Add -> { if target_str == "Add" { return true } }
+        Sub -> { if target_str == "Sub" { return true } }
+        Mul -> { if target_str == "Mul" { return true } }
+        Div -> { if target_str == "Div" { return true } }
+        Mod -> { if target_str == "Mod" { return true } }
+        Pipe -> { if target_str == "Pipe" { return true } }
+        Arrow -> { if target_str == "Arrow" { return true } }
+        Caret -> { if target_str == "Caret" { return true } }
+        Alloc -> { if target_str == "Alloc" { return true } }
+        Free -> { if target_str == "Free" { return true } }
+        Question -> { if target_str == "Question" { return true } }
+        NoneLiteral -> { if target_str == "NoneLiteral" { return true } }
+        LBrace -> { if target_str == "LBrace" { return true } }
+        RBrace -> { if target_str == "RBrace" { return true } }
+        LBracket -> { if target_str == "LBracket" { return true } }
+        RBracket -> { if target_str == "RBracket" { return true } }
+        LParen -> { if target_str == "LParen" { return true } }
+        RParen -> { if target_str == "RParen" { return true } }
+        Colon -> { if target_str == "Colon" { return true } }
+        Comma -> { if target_str == "Comma" { return true } }
+        Dot -> { if target_str == "Dot" { return true } }
+        DotDot -> { if target_str == "DotDot" { return true } }
+        Error(val) -> { if target_str == "Error" { return true } }
+        Eof -> { if target_str == "Eof" { return true } }
+    }
+    return false
+}
+
+fn consume(mut p: ^Parser, expected_str: String, msg: String) -> Boolean {
+    if check_token(p^.current_token^.kind, expected_str) {
+        advance_parser(p)
+        return true
+    }
+    mut span = alloc_span(p^.current_token^.line, p^.current_token^.col, p^.current_token^.line, p^.current_token^.col)
+    report_error(p, span, msg)
+    return false
+}
+
+fn consume_ident(mut p: ^Parser, msg: String) -> String {
+    mut ident = ""
+    mut matched = false
+    when p^.current_token^.kind {
+        Data -> { }
+        Fn -> { }
+        Let -> { }
+        Mut -> { }
+        If -> { }
+        Else -> { }
+        While -> { }
+        Return -> { }
+        When -> { }
+        Break -> { }
+        Continue -> { }
+        Use -> { }
+        Extern -> { }
+        True -> { }
+        False -> { }
+        Choice -> { }
+        And -> { }
+        Or -> { }
+        Not -> { }
+        BitAnd -> { }
+        BitOr -> { }
+        BitXor -> { }
+        Shl -> { }
+        Shr -> { }
+        As -> { }
+        Identifier(name) -> {
+            ident = name
+            matched = true
+        }
+        Integer(val) -> { }
+        Float(val) -> { }
+        StringLiteral(val) -> { }
+        CharLiteral(val) -> { }
+        Assign -> { }
+        AddAssign -> { }
+        SubAssign -> { }
+        MulAssign -> { }
+        DivAssign -> { }
+        Eq -> { }
+        NotEq -> { }
+        Lt -> { }
+        LtEq -> { }
+        Gt -> { }
+        GtEq -> { }
+        Add -> { }
+        Sub -> { }
+        Mul -> { }
+        Div -> { }
+        Mod -> { }
+        Pipe -> { }
+        Arrow -> { }
+        Caret -> { }
+        Alloc -> { }
+        Free -> { }
+        Question -> { }
+        NoneLiteral -> { }
+        LBrace -> { }
+        RBrace -> { }
+        LBracket -> { }
+        RBracket -> { }
+        LParen -> { }
+        RParen -> { }
+        Colon -> { }
+        Comma -> { }
+        Dot -> { }
+        DotDot -> { }
+        Error(val) -> { }
+        Eof -> { }
+    }
+    if matched {
+        advance_parser(p)
+        return ident
+    }
+    mut span = alloc_span(p^.current_token^.line, p^.current_token^.col, p^.current_token^.line, p^.current_token^.col)
+    report_error(p, span, msg)
+    return ""
+}
+
+// ---------------------------------------------------------
+// Expressions (Stub)
+// ---------------------------------------------------------
+fn parse_expression(mut p: ^Parser) -> ?^Spanned(Expression) {
+    return parse_pipe_expr(p)
+}
+
+fn parse_pipe_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    mut left_opt = parse_logical_expr(p)
+    when left_opt {
+        None -> {
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        l -> {
+            mut left = l
+            while check_token(p^.current_token^.kind, "Pipe") {
+                mut op = BinaryOp.Pipe
+                advance_parser(p)
+                
+                let right_opt = parse_logical_expr(p)
+                when right_opt {
+                    None -> {
+                        mut ret: ?^Spanned(Expression) = None
+                        return ret
+                    }
+                    right -> {
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, right^.span^.end_line, right^.span^.end_col)
+                        
+                        mut bin_expr = alloc BinaryExpr()
+                        bin_expr^.left = left
+                        bin_expr^.op = op
+                        bin_expr^.right = right
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        
+                        mut p_ptr = alloc BinaryExpr()
+                        p_ptr^ = bin_expr^
+                        expr^.node = Expression.Binary(p_ptr)
+                        
+                        left = expr
+                    }
+                }
+            }
+            mut ret: ?^Spanned(Expression) = None
+            ret = left
+            return ret
+        }
+    }
+}
+fn parse_logical_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    mut left_opt = parse_bitwise_or_expr(p)
+    when left_opt {
+        None -> {
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        l -> {
+            mut left = l
+            while check_token(p^.current_token^.kind, "And") or check_token(p^.current_token^.kind, "Or") {
+                mut op = BinaryOp.And
+                if check_token(p^.current_token^.kind, "Or") {
+                    op = BinaryOp.Or
+                }
+                advance_parser(p)
+                
+                let right_opt = parse_bitwise_or_expr(p)
+                when right_opt {
+                    None -> {
+                        mut ret: ?^Spanned(Expression) = None
+                        return ret
+                    }
+                    right -> {
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, right^.span^.end_line, right^.span^.end_col)
+                        
+                        mut bin_expr = alloc BinaryExpr()
+                        bin_expr^.left = left
+                        bin_expr^.op = op
+                        bin_expr^.right = right
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        
+                        mut p_ptr = alloc BinaryExpr()
+                        p_ptr^ = bin_expr^
+                        expr^.node = Expression.Binary(p_ptr)
+                        
+                        left = expr
+                    }
+                }
+            }
+            mut ret: ?^Spanned(Expression) = None
+            ret = left
+            return ret
+        }
+    }
+}
+fn parse_bitwise_or_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    mut left_opt = parse_bitwise_xor_expr(p)
+    when left_opt {
+        None -> {
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        l -> {
+            mut left = l
+            while check_token(p^.current_token^.kind, "BitOr") {
+                mut op = BinaryOp.BitOr
+                advance_parser(p)
+                
+                let right_opt = parse_bitwise_xor_expr(p)
+                when right_opt {
+                    None -> {
+                        mut ret: ?^Spanned(Expression) = None
+                        return ret
+                    }
+                    right -> {
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, right^.span^.end_line, right^.span^.end_col)
+                        
+                        mut bin_expr = alloc BinaryExpr()
+                        bin_expr^.left = left
+                        bin_expr^.op = op
+                        bin_expr^.right = right
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        
+                        mut p_ptr = alloc BinaryExpr()
+                        p_ptr^ = bin_expr^
+                        expr^.node = Expression.Binary(p_ptr)
+                        
+                        left = expr
+                    }
+                }
+            }
+            mut ret: ?^Spanned(Expression) = None
+            ret = left
+            return ret
+        }
+    }
+}
+fn parse_bitwise_xor_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    mut left_opt = parse_bitwise_and_expr(p)
+    when left_opt {
+        None -> {
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        l -> {
+            mut left = l
+            while check_token(p^.current_token^.kind, "BitXor") {
+                mut op = BinaryOp.BitXor
+                advance_parser(p)
+                
+                let right_opt = parse_bitwise_and_expr(p)
+                when right_opt {
+                    None -> {
+                        mut ret: ?^Spanned(Expression) = None
+                        return ret
+                    }
+                    right -> {
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, right^.span^.end_line, right^.span^.end_col)
+                        
+                        mut bin_expr = alloc BinaryExpr()
+                        bin_expr^.left = left
+                        bin_expr^.op = op
+                        bin_expr^.right = right
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        
+                        mut p_ptr = alloc BinaryExpr()
+                        p_ptr^ = bin_expr^
+                        expr^.node = Expression.Binary(p_ptr)
+                        
+                        left = expr
+                    }
+                }
+            }
+            mut ret: ?^Spanned(Expression) = None
+            ret = left
+            return ret
+        }
+    }
+}
+fn parse_bitwise_and_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    mut left_opt = parse_equality_expr(p)
+    when left_opt {
+        None -> {
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        l -> {
+            mut left = l
+            while check_token(p^.current_token^.kind, "BitAnd") {
+                mut op = BinaryOp.BitAnd
+                advance_parser(p)
+                
+                let right_opt = parse_equality_expr(p)
+                when right_opt {
+                    None -> {
+                        mut ret: ?^Spanned(Expression) = None
+                        return ret
+                    }
+                    right -> {
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, right^.span^.end_line, right^.span^.end_col)
+                        
+                        mut bin_expr = alloc BinaryExpr()
+                        bin_expr^.left = left
+                        bin_expr^.op = op
+                        bin_expr^.right = right
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        
+                        mut p_ptr = alloc BinaryExpr()
+                        p_ptr^ = bin_expr^
+                        expr^.node = Expression.Binary(p_ptr)
+                        
+                        left = expr
+                    }
+                }
+            }
+            mut ret: ?^Spanned(Expression) = None
+            ret = left
+            return ret
+        }
+    }
+}
+fn parse_equality_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    mut left_opt = parse_relational_expr(p)
+    when left_opt {
+        None -> {
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        l -> {
+            mut left = l
+            while check_token(p^.current_token^.kind, "Eq") or check_token(p^.current_token^.kind, "NotEq") {
+                mut op = BinaryOp.Eq
+                if check_token(p^.current_token^.kind, "NotEq") {
+                    op = BinaryOp.NotEq
+                }
+                advance_parser(p)
+                
+                let right_opt = parse_relational_expr(p)
+                when right_opt {
+                    None -> {
+                        mut ret: ?^Spanned(Expression) = None
+                        return ret
+                    }
+                    right -> {
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, right^.span^.end_line, right^.span^.end_col)
+                        
+                        mut bin_expr = alloc BinaryExpr()
+                        bin_expr^.left = left
+                        bin_expr^.op = op
+                        bin_expr^.right = right
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        
+                        mut p_ptr = alloc BinaryExpr()
+                        p_ptr^ = bin_expr^
+                        expr^.node = Expression.Binary(p_ptr)
+                        
+                        left = expr
+                    }
+                }
+            }
+            mut ret: ?^Spanned(Expression) = None
+            ret = left
+            return ret
+        }
+    }
+}
+fn parse_relational_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    mut left_opt = parse_shift_expr(p)
+    when left_opt {
+        None -> {
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        l -> {
+            mut left = l
+            while check_token(p^.current_token^.kind, "Lt") or check_token(p^.current_token^.kind, "LtEq") or check_token(p^.current_token^.kind, "Gt") or check_token(p^.current_token^.kind, "GtEq") {
+                mut op = BinaryOp.Lt
+                if check_token(p^.current_token^.kind, "LtEq") {
+                    op = BinaryOp.LtEq
+                }
+                if check_token(p^.current_token^.kind, "Gt") {
+                    op = BinaryOp.Gt
+                }
+                if check_token(p^.current_token^.kind, "GtEq") {
+                    op = BinaryOp.GtEq
+                }
+                advance_parser(p)
+                
+                let right_opt = parse_shift_expr(p)
+                when right_opt {
+                    None -> {
+                        mut ret: ?^Spanned(Expression) = None
+                        return ret
+                    }
+                    right -> {
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, right^.span^.end_line, right^.span^.end_col)
+                        
+                        mut bin_expr = alloc BinaryExpr()
+                        bin_expr^.left = left
+                        bin_expr^.op = op
+                        bin_expr^.right = right
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        
+                        mut p_ptr = alloc BinaryExpr()
+                        p_ptr^ = bin_expr^
+                        expr^.node = Expression.Binary(p_ptr)
+                        
+                        left = expr
+                    }
+                }
+            }
+            mut ret: ?^Spanned(Expression) = None
+            ret = left
+            return ret
+        }
+    }
+}
+fn parse_shift_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    mut left_opt = parse_additive_expr(p)
+    when left_opt {
+        None -> {
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        l -> {
+            mut left = l
+            while check_token(p^.current_token^.kind, "Shl") or check_token(p^.current_token^.kind, "Shr") {
+                mut op = BinaryOp.Shl
+                if check_token(p^.current_token^.kind, "Shr") {
+                    op = BinaryOp.Shr
+                }
+                advance_parser(p)
+                
+                let right_opt = parse_additive_expr(p)
+                when right_opt {
+                    None -> {
+                        mut ret: ?^Spanned(Expression) = None
+                        return ret
+                    }
+                    right -> {
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, right^.span^.end_line, right^.span^.end_col)
+                        
+                        mut bin_expr = alloc BinaryExpr()
+                        bin_expr^.left = left
+                        bin_expr^.op = op
+                        bin_expr^.right = right
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        
+                        mut p_ptr = alloc BinaryExpr()
+                        p_ptr^ = bin_expr^
+                        expr^.node = Expression.Binary(p_ptr)
+                        
+                        left = expr
+                    }
+                }
+            }
+            mut ret: ?^Spanned(Expression) = None
+            ret = left
+            return ret
+        }
+    }
+}
+fn parse_additive_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    mut left_opt = parse_multiplicative_expr(p)
+    when left_opt {
+        None -> {
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        l -> {
+            mut left = l
+            while check_token(p^.current_token^.kind, "Add") or check_token(p^.current_token^.kind, "Sub") {
+                mut op = BinaryOp.Add
+                if check_token(p^.current_token^.kind, "Sub") {
+                    op = BinaryOp.Sub
+                }
+                advance_parser(p)
+                
+                let right_opt = parse_multiplicative_expr(p)
+                when right_opt {
+                    None -> {
+                        mut ret: ?^Spanned(Expression) = None
+                        return ret
+                    }
+                    right -> {
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, right^.span^.end_line, right^.span^.end_col)
+                        
+                        mut bin_expr = alloc BinaryExpr()
+                        bin_expr^.left = left
+                        bin_expr^.op = op
+                        bin_expr^.right = right
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        
+                        mut p_ptr = alloc BinaryExpr()
+                        p_ptr^ = bin_expr^
+                        expr^.node = Expression.Binary(p_ptr)
+                        
+                        left = expr
+                    }
+                }
+            }
+            mut ret: ?^Spanned(Expression) = None
+            ret = left
+            return ret
+        }
+    }
+}
+fn parse_multiplicative_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    mut left_opt = parse_unary_expr(p)
+    when left_opt {
+        None -> {
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        l -> {
+            mut left = l
+            while check_token(p^.current_token^.kind, "Mul") or check_token(p^.current_token^.kind, "Div") or check_token(p^.current_token^.kind, "Mod") {
+                mut op = BinaryOp.Mul
+                if check_token(p^.current_token^.kind, "Div") {
+                    op = BinaryOp.Div
+                }
+                if check_token(p^.current_token^.kind, "Mod") {
+                    op = BinaryOp.Mod
+                }
+                advance_parser(p)
+                
+                let right_opt = parse_unary_expr(p)
+                when right_opt {
+                    None -> {
+                        mut ret: ?^Spanned(Expression) = None
+                        return ret
+                    }
+                    right -> {
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, right^.span^.end_line, right^.span^.end_col)
+                        
+                        mut bin_expr = alloc BinaryExpr()
+                        bin_expr^.left = left
+                        bin_expr^.op = op
+                        bin_expr^.right = right
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        
+                        mut p_ptr = alloc BinaryExpr()
+                        p_ptr^ = bin_expr^
+                        expr^.node = Expression.Binary(p_ptr)
+                        
+                        left = expr
+                    }
+                }
+            }
+            mut ret: ?^Spanned(Expression) = None
+            ret = left
+            return ret
+        }
+    }
+}
+
+fn parse_generic_params(mut p: ^Parser) -> ?^List(String) {
+    mut dummy_str = alloc String()
+    mut params = new_list(2, dummy_str)
+    
+    if check_token(p^.current_token^.kind, "LParen") {
+        advance_parser(p)
+        if not check_token(p^.current_token^.kind, "RParen") {
+            let name = consume_ident(p, "Expected identifier for generic parameter")
+            if name == "" { 
+                mut ret: ?^List(String) = None
+                return ret 
+            }
+            list_push(params, name)
+            
+            while check_token(p^.current_token^.kind, "Comma") {
+                advance_parser(p)
+                let n = consume_ident(p, "Expected identifier for generic parameter")
+                if n == "" { 
+                    mut ret: ?^List(String) = None
+                    return ret 
+                }
+                list_push(params, n)
+            }
+        }
+        consume(p, "RParen", "Expected ')' after generic parameters")
+    }
+    mut ret: ?^List(String) = None
+    ret = params
+    return ret
+}
+
+// ---------------------------------------------------------
+// Types
+// ---------------------------------------------------------
+fn parse_type(mut p: ^Parser) -> ?^Spanned(Type) {
+    let start_line = p^.current_token^.line
+    let start_col = p^.current_token^.col
+    
+    mut is_ptr = false
+    mut is_nullable = false
+    
+    if check_token(p^.current_token^.kind, "Question") {
+        advance_parser(p)
+        is_nullable = true
+    }
+    
+    if check_token(p^.current_token^.kind, "Caret") {
+        advance_parser(p)
+        is_ptr = true
+    }
+    
+    let name = consume_ident(p, "Expected type name")
+    if name == "" {
+        mut ret: ?^Spanned(Type) = None
+        return ret
+    }
+    
+    // Arrays and Generics skipped for this initial test translation
+    mut ty = alloc Type()
+    ty^.name = name
+    ty^.is_ptr = is_ptr
+    ty^.is_nullable = is_nullable
+    ty^.is_array = false
+    ty^.array_size = 0
+    mut dummy_ptr = alloc Spanned(Type)()
+    ty^.generic_args = new_list(0, dummy_ptr)
+    
+    mut span = alloc_span(start_line, start_col, p^.current_token^.line, p^.current_token^.col)
+    mut ret: ?^Spanned(Type) = alloc_spanned(Type)(ty^, span)
+    return ret
+}
+
+// ---------------------------------------------------------
+// Declarations
+// ---------------------------------------------------------
+
+fn parse_param(mut p: ^Parser) -> ?^Param {
+    mut is_mut = false
+    if check_token(p^.current_token^.kind, "Mut") {
+        advance_parser(p)
+        is_mut = true
+    }
+    
+    let name = consume_ident(p, "Expected parameter name")
+    if name == "" { 
+        mut ret: ?^Param = None
+        return ret 
+    }
+    
+    if not consume(p, "Colon", "Expected ':' after parameter name") {
+        mut ret: ?^Param = None
+        return ret 
+    }
+    
+    let ty_opt = parse_type(p)
+    when ty_opt {
+        None -> { 
+            mut ret: ?^Param = None
+            return ret 
+        }
+        ty -> {
+            mut param = alloc Param()
+            param^.is_mut = is_mut
+            param^.name = name
+            param^.ty = ty
+            mut ret: ?^Param = None
+            ret = param
+            return ret
+        }
+    }
+    mut ret: ?^Param = None
+    return ret
+}
+
+// ---------------------------------------------------------
+// Statements
+// ---------------------------------------------------------
+
+fn parse_if_stmt(mut p: ^Parser) -> ?^IfStmt {
+    if not consume(p, "If", "Expected 'if'") {
+        mut ret: ?^IfStmt = None
+        return ret
+    }
+    
+    let condition_opt = parse_expression(p)
+    mut condition: ?^Spanned(Expression) = None
+    when condition_opt {
+        None -> {
+            mut ret: ?^IfStmt = None
+            return ret
+        }
+        c -> { condition = c }
+    }
+    
+    let then_block_opt = parse_block(p)
+    mut then_block: ?^Spanned(Block) = None
+    when then_block_opt {
+        None -> {
+            mut ret: ?^IfStmt = None
+            return ret
+        }
+        b -> { then_block = b }
+    }
+    
+    mut else_branch: ?^Spanned(ElseBranch) = None
+    
+    if check_token(p^.current_token^.kind, "Else") {
+        let start_line = p^.current_token^.line
+        let start_col = p^.current_token^.col
+        advance_parser(p)
+        
+        if check_token(p^.current_token^.kind, "If") {
+            let else_if_opt = parse_if_stmt(p)
+            when else_if_opt {
+                None -> {}
+                ei -> {
+                    mut span = alloc_span(start_line, start_col, p^.current_token^.line, p^.current_token^.col)
+                    mut branch = ElseBranch.If(ei)
+                    else_branch = alloc_spanned(ElseBranch)(branch, span)
+                }
+            }
+        } else {
+            let else_block_opt = parse_block(p)
+            when else_block_opt {
+                None -> {}
+                eb -> {
+                    mut span = alloc_span(start_line, start_col, p^.current_token^.line, p^.current_token^.col)
+                    mut blk_ptr = alloc Block()
+                    blk_ptr^ = eb^.node
+                    mut branch = ElseBranch.Block(blk_ptr)
+                    else_branch = alloc_spanned(ElseBranch)(branch, span)
+                }
+            }
+        }
+    }
+    
+    when condition {
+        None -> {} // unreachable
+        c -> {
+            when then_block {
+                None -> {} // unreachable
+                t -> {
+                    mut stmt = alloc IfStmt()
+                    stmt^.condition = c
+                    stmt^.then_block = t
+                    stmt^.else_branch = else_branch
+                    mut ret: ?^IfStmt = None
+                    ret = stmt
+                    return ret
+                }
+            }
+        }
+    }
+    mut ret: ?^IfStmt = None
+    return ret
+}
+
+fn parse_while_stmt(mut p: ^Parser) -> ?^WhileStmt {
+    if not consume(p, "While", "Expected 'while'") {
+        mut ret: ?^WhileStmt = None
+        return ret
+    }
+    
+    let condition_opt = parse_expression(p)
+    let block_opt = parse_block(p)
+    
+    when condition_opt {
+        None -> {
+            mut ret: ?^WhileStmt = None
+            return ret
+        }
+        c -> {
+            when block_opt {
+                None -> {
+                    mut ret: ?^WhileStmt = None
+                    return ret
+                }
+                b -> {
+                    mut stmt = alloc WhileStmt()
+                    stmt^.condition = c
+                    stmt^.block = b
+                    mut ret: ?^WhileStmt = None
+                    ret = stmt
+                    return ret
+                }
+            }
+        }
+    }
+    mut ret: ?^WhileStmt = None
+    return ret
+}
+
+fn parse_return_stmt(mut p: ^Parser) -> ?^ReturnStmt {
+    if not consume(p, "Return", "Expected 'return'") {
+        mut ret: ?^ReturnStmt = None
+        return ret
+    }
+    
+    mut value: ?^Spanned(Expression) = None
+    if not check_token(p^.current_token^.kind, "RBrace") and not check_token(p^.current_token^.kind, "Eof") {
+        value = parse_expression(p)
+    }
+    
+    mut stmt = alloc ReturnStmt()
+    stmt^.value = value
+    mut ret: ?^ReturnStmt = None
+    ret = stmt
+    return ret
+}
+
+fn parse_free_stmt(mut p: ^Parser) -> ?^Spanned(Expression) {
+    if not consume(p, "Free", "Expected 'free'") {
+        mut ret: ?^Spanned(Expression) = None
+        return ret
+    }
+    return parse_expression(p)
+}
+
+fn parse_statement(mut p: ^Parser) -> ?^Spanned(Statement) {
+    let start_line = p^.current_token^.line
+    let start_col = p^.current_token^.col
+    
+    mut stmt_opt: ?Statement = None
+    
+    if check_token(p^.current_token^.kind, "Let") or check_token(p^.current_token^.kind, "Mut") {
+        let var_opt = parse_var_decl(p)
+        when var_opt {
+            None -> {}
+            v -> { stmt_opt = Statement.Var(v) }
+        }
+    } else if check_token(p^.current_token^.kind, "If") {
+        let if_opt = parse_if_stmt(p)
+        when if_opt {
+            None -> {}
+            i -> { stmt_opt = Statement.If(i) }
+        }
+    } else if check_token(p^.current_token^.kind, "While") {
+        let w_opt = parse_while_stmt(p)
+        when w_opt {
+            None -> {}
+            w -> { stmt_opt = Statement.While(w) }
+        }
+    } else if check_token(p^.current_token^.kind, "Return") {
+        let r_opt = parse_return_stmt(p)
+        when r_opt {
+            None -> {}
+            r -> { stmt_opt = Statement.Return(r) }
+        }
+    } else if check_token(p^.current_token^.kind, "Break") {
+        advance_parser(p)
+        stmt_opt = Statement.Break
+    } else if check_token(p^.current_token^.kind, "Continue") {
+        advance_parser(p)
+        stmt_opt = Statement.Continue
+    } else if check_token(p^.current_token^.kind, "Free") {
+        let f_opt = parse_free_stmt(p)
+        when f_opt {
+            None -> {}
+            f -> { stmt_opt = Statement.Free(f) }
+        }
+    } else {
+        // Default to expression statement or assignment
+        let expr_opt = parse_expression(p)
+        when expr_opt {
+            None -> {}
+            expr -> {
+                mut is_assign = false
+                mut op = AssignOp.Assign
+                
+                if check_token(p^.current_token^.kind, "Assign") {
+                    is_assign = true
+                    op = AssignOp.Assign
+                } else if check_token(p^.current_token^.kind, "AddAssign") {
+                    is_assign = true
+                    op = AssignOp.AddAssign
+                } else if check_token(p^.current_token^.kind, "SubAssign") {
+                    is_assign = true
+                    op = AssignOp.SubAssign
+                } else if check_token(p^.current_token^.kind, "MulAssign") {
+                    is_assign = true
+                    op = AssignOp.MulAssign
+                } else if check_token(p^.current_token^.kind, "DivAssign") {
+                    is_assign = true
+                    op = AssignOp.DivAssign
+                }
+                
+                if is_assign {
+                    advance_parser(p)
+                    let val_opt = parse_expression(p)
+                    when val_opt {
+                        None -> {}
+                        val -> {
+                            mut assign = alloc Assignment()
+                            assign^.target = expr
+                            assign^.op = op
+                            assign^.value = val
+                            stmt_opt = Statement.Assignment(assign)
+                        }
+                    }
+                } else {
+                    stmt_opt = Statement.Expr(expr)
+                }
+            }
+        }
+    }
+    
+    when stmt_opt {
+        None -> {
+            mut ret: ?^Spanned(Statement) = None
+            return ret
+        }
+        stmt -> {
+            mut span = alloc_span(start_line, start_col, p^.current_token^.line, p^.current_token^.col)
+            mut ret: ?^Spanned(Statement) = None
+            ret = alloc_spanned(Statement)(stmt, span)
+            return ret
+        }
+    }
+    mut ret: ?^Spanned(Statement) = None
+    return ret
+}
+
+fn parse_block(mut p: ^Parser) -> ?^Spanned(Block) {
+    let start_line = p^.current_token^.line
+    let start_col = p^.current_token^.col
+    
+    if not consume(p, "LBrace", "Expected '{' before block") {
+        mut ret: ?^Spanned(Block) = None
+        return ret
+    }
+    
+    mut dummy_stmt = alloc Spanned(Statement)()
+    mut statements = new_list(4, dummy_stmt)
+    
+    while not check_token(p^.current_token^.kind, "RBrace") and not check_token(p^.current_token^.kind, "Eof") {
+        let stmt_opt = parse_statement(p)
+        when stmt_opt {
+            None -> {
+                // To prevent infinite loop on error, consume token if it failed
+                advance_parser(p)
+            }
+            stmt -> {
+                list_push(statements, stmt^)
+            }
+        }
+    }
+    
+    consume(p, "RBrace", "Expected '}' after block")
+    
+    mut block = alloc Block()
+    block^.statements = statements
+    
+    mut span = alloc_span(start_line, start_col, p^.current_token^.line, p^.current_token^.col)
+    mut ret: ?^Spanned(Block) = None
+    ret = alloc_spanned(Block)(block, span)
+    return ret
+}
+
+fn parse_fn_decl(mut p: ^Parser) -> ?^FnDecl {
+    if not consume(p, "Fn", "Expected 'fn'") {
+        mut ret: ?^FnDecl = None
+        return ret
+    }
+    
+    let name = consume_ident(p, "Expected identifier for function name")
+    if name == "" { 
+        mut ret: ?^FnDecl = None
+        return ret 
+    }
+    
+    mut dummy_str = alloc String()
+    mut generic_params = new_list(0, dummy_str)
+    // Skipped parsing generic params and lookahead
+    
+    if not consume(p, "LParen", "Expected '(' after function name") {
+        mut ret: ?^FnDecl = None
+        return ret
+    }
+    
+    mut dummy_param = alloc Param()
+    mut params = new_list(4, dummy_param)
+    
+    if not check_token(p^.current_token^.kind, "RParen") {
+        let param_opt = parse_param(p)
+        when param_opt {
+            None -> {}
+            param -> { list_push(params, param^) }
+        }
+        while check_token(p^.current_token^.kind, "Comma") {
+            advance_parser(p)
+            let p_opt = parse_param(p)
+            when p_opt {
+                None -> {}
+                pr -> { list_push(params, pr^) }
+            }
+        }
+    }
+    
+    consume(p, "RParen", "Expected ')' after parameters")
+    
+    mut return_type: ?^Spanned(Type) = None
+    if check_token(p^.current_token^.kind, "Arrow") {
+        advance_parser(p)
+        return_type = parse_type(p)
+    }
+    
+    let body_opt = parse_block(p)
+    when body_opt {
+        None -> {
+            mut ret: ?^FnDecl = None
+            return ret
+        }
+        body -> {
+            mut decl = alloc FnDecl()
+            decl^.name = name
+            decl^.generic_params = generic_params
+            decl^.params = params
+            decl^.return_type = return_type
+            decl^.body = body
+            mut ret: ?^FnDecl = None
+            ret = decl
+            return ret
+        }
+    }
+    mut ret: ?^FnDecl = None
+    return ret
+}
+
+fn parse_field_decl(mut p: ^Parser) -> ?^FieldDecl {
+    let name = consume_ident(p, "Expected field name")
+    if name == "" { 
+        mut ret: ?^FieldDecl = None
+        return ret 
+    }
+    
+    if not consume(p, "Colon", "Expected ':' after field name") { 
+        mut ret: ?^FieldDecl = None
+        return ret 
+    }
+    
+    let ty_opt = parse_type(p)
+    when ty_opt {
+        None -> { 
+            mut ret: ?^FieldDecl = None
+            return ret 
+        }
+        ty -> {
+            mut field = alloc FieldDecl()
+            field^.name = name
+            field^.ty = ty
+            mut ret: ?^FieldDecl = None
+            ret = field
+            return ret
+        }
+    }
+    mut ret: ?^FieldDecl = None
+    return ret
+}
+
+fn parse_data_decl(mut p: ^Parser) -> ?^DataDecl {
+    if not consume(p, "Data", "Expected 'data'") { 
+        mut ret: ?^DataDecl = None
+        return ret 
+    }
+    
+    let name = consume_ident(p, "Expected identifier for data name")
+    if name == "" { 
+        mut ret: ?^DataDecl = None
+        return ret 
+    }
+    
+    mut dummy_str = alloc String()
+    mut generic_params = new_list(0, dummy_str)
+    // Skipped parsing generic params for now
+    
+    if not consume(p, "LBrace", "Expected '{' before data body") { 
+        mut ret: ?^DataDecl = None
+        return ret 
+    }
+    
+    mut dummy_field = alloc FieldDecl()
+    mut fields = new_list(4, dummy_field)
+    
+    while not check_token(p^.current_token^.kind, "RBrace") and not check_token(p^.current_token^.kind, "Eof") {
+        let field_opt = parse_field_decl(p)
+        when field_opt {
+            None -> { }
+            field -> { list_push(fields, field^) }
+        }
+        // comma consumption skipped for simplicity
+    }
+    
+    consume(p, "RBrace", "Expected '}' after data body")
+    
+    mut decl = alloc DataDecl()
+    decl^.name = name
+    decl^.generic_params = generic_params
+    decl^.fields = fields
+    mut ret: ?^DataDecl = None
+    ret = decl
+    return ret
+}
+
+fn parse_var_decl(mut p: ^Parser) -> ?^VarDecl {
+    mut is_mut = false
+    if check_token(p^.current_token^.kind, "Mut") {
+        is_mut = true
+        advance_parser(p)
+    } else {
+        if not consume(p, "Let", "Expected 'let' or 'mut'") {
+            mut ret: ?^VarDecl = None
+            return ret
+        }
+    }
+    
+    let name = consume_ident(p, "Expected identifier for variable name")
+    if name == "" { 
+        mut ret: ?^VarDecl = None
+        return ret 
+    }
+    
+    mut ty: ?^Spanned(Type) = None
+    if check_token(p^.current_token^.kind, "Colon") {
+        advance_parser(p)
+        ty = parse_type(p)
+    }
+    
+    if not consume(p, "Assign", "Expected '=' in variable declaration") {
+        mut ret: ?^VarDecl = None
+        return ret
+    }
+    
+    let init_opt = parse_expression(p)
+    when init_opt {
+        None -> {
+            mut ret: ?^VarDecl = None
+            return ret
+        }
+        init -> {
+            mut decl = alloc VarDecl()
+            decl^.is_mut = is_mut
+            decl^.name = name
+            decl^.ty = ty
+            decl^.initializer = init
+            mut ret: ?^VarDecl = None
+            ret = decl
+            return ret
+        }
+    }
+    mut ret: ?^VarDecl = None
+    return ret
+}
+
+fn parse_choice_decl(mut p: ^Parser) -> ?^ChoiceDecl {
+    if not consume(p, "Choice", "Expected 'choice'") {
+        mut ret: ?^ChoiceDecl = None
+        return ret
+    }
+    
+    let name = consume_ident(p, "Expected identifier for choice name")
+    if name == "" { 
+        mut ret: ?^ChoiceDecl = None
+        return ret 
+    }
+    
+    let gen_opt = parse_generic_params(p)
+    mut generic_params: ^List(String) = new_list(0, alloc String())
+    when gen_opt {
+        None -> {}
+        g -> { generic_params = g }
+    }
+    
+    if not consume(p, "LBrace", "Expected '{' before choice body") {
+        mut ret: ?^ChoiceDecl = None
+        return ret
+    }
+    
+    mut dummy_variant = alloc VariantDecl()
+    mut variants = new_list(4, dummy_variant)
+    
+    while not check_token(p^.current_token^.kind, "RBrace") and not check_token(p^.current_token^.kind, "Eof") {
+        mut variant_name = ""
+        if check_token(p^.current_token^.kind, "NoneLiteral") {
+            variant_name = "None"
+            advance_parser(p)
+        } else {
+            variant_name = consume_ident(p, "Expected identifier for variant name")
+        }
+        
+        if variant_name == "" {
+            mut ret: ?^ChoiceDecl = None
+            return ret
+        }
+        
+        mut dummy_ty = alloc Spanned(Type)()
+        mut associated_types = new_list(2, dummy_ty)
+        
+        if check_token(p^.current_token^.kind, "LParen") {
+            advance_parser(p)
+            if not check_token(p^.current_token^.kind, "RParen") {
+                let ty_opt = parse_type(p)
+                when ty_opt {
+                    None -> {}
+                    ty -> { list_push(associated_types, ty^) }
+                }
+                while check_token(p^.current_token^.kind, "Comma") {
+                    advance_parser(p)
+                    if not check_token(p^.current_token^.kind, "RParen") {
+                        let t2_opt = parse_type(p)
+                        when t2_opt {
+                            None -> {}
+                            t2 -> { list_push(associated_types, t2^) }
+                        }
+                    }
+                }
+            }
+            consume(p, "RParen", "Expected ')' after associated types")
+        }
+        
+        mut vdecl = alloc VariantDecl()
+        vdecl^.name = variant_name
+        vdecl^.associated_types = associated_types
+        list_push(variants, vdecl^)
+        
+        if check_token(p^.current_token^.kind, "Comma") {
+            advance_parser(p)
+        }
+    }
+    
+    consume(p, "RBrace", "Expected '}' after choice body")
+    
+    mut decl = alloc ChoiceDecl()
+    decl^.name = name
+    decl^.generic_params = generic_params
+    decl^.variants = variants
+    mut ret: ?^ChoiceDecl = None
+    ret = decl
+    return ret
+}
+
+fn parse_extern_decl(mut p: ^Parser) -> ?^ExternDecl {
+    if not consume(p, "Extern", "Expected 'extern'") {
+        mut ret: ?^ExternDecl = None
+        return ret
+    }
+    if not consume(p, "Fn", "Expected 'fn' after 'extern'") {
+        mut ret: ?^ExternDecl = None
+        return ret
+    }
+    
+    let name = consume_ident(p, "Expected identifier for external function name")
+    if name == "" { 
+        mut ret: ?^ExternDecl = None
+        return ret 
+    }
+    
+    let gen_opt = parse_generic_params(p)
+    mut generic_params: ^List(String) = new_list(0, alloc String())
+    when gen_opt {
+        None -> {}
+        g -> { generic_params = g }
+    }
+    
+    if not consume(p, "LParen", "Expected '(' after function name") {
+        mut ret: ?^ExternDecl = None
+        return ret
+    }
+    
+    mut dummy_param = alloc Param()
+    mut params = new_list(4, dummy_param)
+    
+    if not check_token(p^.current_token^.kind, "RParen") {
+        let param_opt = parse_param(p)
+        when param_opt {
+            None -> {}
+            param -> { list_push(params, param^) }
+        }
+        while check_token(p^.current_token^.kind, "Comma") {
+            advance_parser(p)
+            let p_opt = parse_param(p)
+            when p_opt {
+                None -> {}
+                pr -> { list_push(params, pr^) }
+            }
+        }
+    }
+    
+    consume(p, "RParen", "Expected ')' after parameters")
+    
+    mut return_type: ?^Spanned(Type) = None
+    if check_token(p^.current_token^.kind, "Arrow") {
+        advance_parser(p)
+        return_type = parse_type(p)
+    }
+    
+    mut decl = alloc ExternDecl()
+    decl^.name = name
+    decl^.generic_params = generic_params
+    decl^.params = params
+    decl^.return_type = return_type
+    mut ret: ?^ExternDecl = None
+    ret = decl
+    return ret
+}
+
+fn parse_declaration(mut p: ^Parser) -> ?^Spanned(Declaration) {
+    let start_line = p^.current_token^.line
+    let start_col = p^.current_token^.col
+    
+    mut decl_opt: ?Declaration = None
+    
+    if check_token(p^.current_token^.kind, "Data") {
+        let data_opt = parse_data_decl(p)
+        when data_opt {
+            None -> { }
+            d -> { decl_opt = Declaration.Data(d) }
+        }
+    }
+    
+    if check_token(p^.current_token^.kind, "Choice") {
+        let choice_opt = parse_choice_decl(p)
+        when choice_opt {
+            None -> { }
+            c -> { decl_opt = Declaration.Choice(c) }
+        }
+    }
+    
+    if check_token(p^.current_token^.kind, "Fn") {
+        let fn_opt = parse_fn_decl(p)
+        when fn_opt {
+            None -> { }
+            f -> { decl_opt = Declaration.Fn(f) }
+        }
+    }
+    
+    if check_token(p^.current_token^.kind, "Extern") {
+        let ext_opt = parse_extern_decl(p)
+        when ext_opt {
+            None -> { }
+            e -> { decl_opt = Declaration.Extern(e) }
+        }
+    }
+    
+    if check_token(p^.current_token^.kind, "Let") or check_token(p^.current_token^.kind, "Mut") {
+        let var_opt = parse_var_decl(p)
+        when var_opt {
+            None -> { }
+            v -> { decl_opt = Declaration.Var(v) }
+        }
+    }
+    
+    when decl_opt {
+        None -> { 
+            mut ret: ?^Spanned(Declaration) = None
+            return ret 
+        }
+        decl -> {
+            mut span = alloc_span(start_line, start_col, p^.current_token^.line, p^.current_token^.col)
+            mut ret: ?^Spanned(Declaration) = None
+            ret = alloc_spanned(Declaration)(decl, span)
+            return ret
+        }
+    }
+    mut ret: ?^Spanned(Declaration) = None
+    return ret
+}
+
+fn parse_import_directive(mut p: ^Parser) -> ?^Spanned(ImportDirective) {
+    let start_line = p^.current_token^.line
+    let start_col = p^.current_token^.col
+    
+    if not consume(p, "Use", "Expected 'use'") {
+        mut ret: ?^Spanned(ImportDirective) = None
+        return ret
+    }
+    
+    mut dummy_str = alloc String()
+    mut path = new_list(2, dummy_str)
+    
+    let first_name = consume_ident(p, "Expected identifier in import path")
+    if first_name == "" {
+        mut ret: ?^Spanned(ImportDirective) = None
+        return ret
+    }
+    list_push(path, first_name)
+    
+    mut end_line = p^.current_token^.line
+    mut end_col = p^.current_token^.col
+    
+    while check_token(p^.current_token^.kind, "Dot") {
+        advance_parser(p)
+        let next_name = consume_ident(p, "Expected identifier after '.' in import path")
+        if next_name == "" {
+            mut ret: ?^Spanned(ImportDirective) = None
+            return ret
+        }
+        list_push(path, next_name)
+        end_line = p^.current_token^.line
+        end_col = p^.current_token^.col
+    }
+    
+    mut span = alloc_span(start_line, start_col, end_line, end_col)
+    mut directive = alloc ImportDirective()
+    directive^.path = path
+    
+    mut ret: ?^Spanned(ImportDirective) = alloc_spanned(ImportDirective)(directive^, span)
+    return ret
+}
+
+fn parse_program(mut p: ^Parser) -> ^Program {
+    mut prog = alloc Program()
+    
+    mut dummy_import = alloc Spanned(ImportDirective)()
+    prog^.imports = new_list(0, dummy_import)
+    
+    mut dummy_decl = alloc Spanned(Declaration)()
+    prog^.declarations = new_list(10, dummy_decl)
+    
+    while check_token(p^.current_token^.kind, "Use") {
+        let import_opt = parse_import_directive(p)
+        when import_opt {
+            None -> { advance_parser(p) }
+            imp -> { list_push(prog^.imports, imp^) }
+        }
+    }
+    
+    while not check_token(p^.current_token^.kind, "Eof") {
+        let decl_opt = parse_declaration(p)
+        when decl_opt {
+            None -> { 
+                if not check_token(p^.current_token^.kind, "Eof") {
+                    advance_parser(p) // prevent infinite loop on error
+                }
+            }
+            decl -> { list_push(prog^.declarations, decl^) }
+        }
+    }
+    
+    return prog
+}
+
+
+fn parse_unary_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    if check_token(p^.current_token^.kind, "Sub") or check_token(p^.current_token^.kind, "Not") {
+        let start_line = p^.current_token^.line
+        let start_col = p^.current_token^.col
+        
+        mut op = UnaryOp.Negate
+        if check_token(p^.current_token^.kind, "Not") {
+            op = UnaryOp.Not
+        }
+        
+        advance_parser(p)
+        
+        let operand_opt = parse_unary_expr(p)
+        when operand_opt {
+            None -> {
+                mut ret: ?^Spanned(Expression) = None
+                return ret
+            }
+            operand -> {
+                mut span = alloc_span(start_line, start_col, operand^.span^.end_line, operand^.span^.end_col)
+                
+                mut un_expr = alloc UnaryExpr()
+                un_expr^.op = op
+                un_expr^.operand = operand
+                
+                mut expr = alloc Spanned(Expression)()
+                expr^.span = span
+                
+                mut p_ptr = alloc UnaryExpr()
+                p_ptr^ = un_expr^
+                expr^.node = Expression.Unary(p_ptr)
+                
+                mut ret: ?^Spanned(Expression) = None
+                ret = expr
+                return ret
+            }
+        }
+    }
+    return parse_cast_expr(p)
+}
+
+fn parse_cast_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    mut left_opt = parse_postfix_expr(p)
+    when left_opt {
+        None -> {
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        l -> {
+            mut left = l
+            while check_token(p^.current_token^.kind, "As") {
+                advance_parser(p)
+                let target_opt = parse_type(p)
+                when target_opt {
+                    None -> {
+                        mut span = alloc_span(p^.current_token^.line, p^.current_token^.col, p^.current_token^.line, p^.current_token^.col)
+                        report_error(p, span, "Expected a valid type after 'as'")
+                        mut ret: ?^Spanned(Expression) = None
+                        return ret
+                    }
+                    target_type -> {
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, target_type^.span^.end_line, target_type^.span^.end_col)
+                        
+                        mut c_expr = alloc CastExpr()
+                        c_expr^.expr = left
+                        c_expr^.target_type = target_type
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        
+                        mut p_ptr = alloc CastExpr()
+                        p_ptr^ = c_expr^
+                        expr^.node = Expression.Cast(p_ptr)
+                        
+                        left = expr
+                    }
+                }
+            }
+            mut ret: ?^Spanned(Expression) = None
+            ret = left
+            return ret
+        }
+    }
+}
+
+fn parse_postfix_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    mut left_opt = parse_primary_expr(p)
+    when left_opt {
+        None -> {
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        l -> {
+            mut left = l
+            mut parsing = true
+            while parsing {
+                if check_token(p^.current_token^.kind, "Dot") {
+                    advance_parser(p)
+                    
+                    mut prop = ""
+                    if check_token(p^.current_token^.kind, "NoneLiteral") {
+                        prop = "None"
+                        advance_parser(p)
+                    } else {
+                        prop = consume_ident(p, "Expected identifier after '.'")
+                        if prop == "" {
+                            mut ret: ?^Spanned(Expression) = None
+                            return ret
+                        }
+                    }
+                    
+                    if check_token(p^.current_token^.kind, "LParen") {
+                        advance_parser(p)
+                        mut args = new_empty_expr_list()
+                        
+                        if not check_token(p^.current_token^.kind, "RParen") {
+                            let arg_opt = parse_expression(p)
+                            when arg_opt {
+                                None -> {}
+                                arg -> { push_expr_list(args, arg^) }
+                            }
+                            while check_token(p^.current_token^.kind, "Comma") {
+                                advance_parser(p)
+                                let n_opt = parse_expression(p)
+                                when n_opt {
+                                    None -> {}
+                                    n -> { push_expr_list(args, n^) }
+                                }
+                            }
+                        }
+                        let end_line = p^.current_token^.line
+                        let end_col = p^.current_token^.col
+                        consume(p, "RParen", "Expected ')' after method arguments")
+                        
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, end_line, end_col)
+                        
+                        mut prop_access = alloc PropertyAccess()
+                        prop_access^.object = left
+                        prop_access^.property = prop
+                        
+                        mut callee_span = alloc_span(left^.span^.start_line, left^.span^.start_col, end_line, end_col)
+                        mut callee = alloc Spanned(Expression)()
+                        callee^.span = callee_span
+                        mut p_ptr_p = alloc PropertyAccess()
+                        p_ptr_p^ = prop_access^
+                        callee^.node = Expression.Property(p_ptr_p)
+                        
+                        mut call = alloc FunctionCall()
+                        call^.callee = callee
+                        call^.arguments = args
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        mut p_ptr_c = alloc FunctionCall()
+                        p_ptr_c^ = call^
+                        expr^.node = Expression.Call(p_ptr_c)
+                        
+                        left = expr
+                    } else {
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, p^.current_token^.line, p^.current_token^.col)
+                        
+                        mut prop_access = alloc PropertyAccess()
+                        prop_access^.object = left
+                        prop_access^.property = prop
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        mut p_ptr = alloc PropertyAccess()
+                        p_ptr^ = prop_access^
+                        expr^.node = Expression.Property(p_ptr)
+                        
+                        left = expr
+                    }
+                } else {
+                    if check_token(p^.current_token^.kind, "LParen") {
+                        advance_parser(p)
+                        mut args = new_empty_expr_list()
+                        
+                        if not check_token(p^.current_token^.kind, "RParen") {
+                            let arg_opt = parse_expression(p)
+                            when arg_opt {
+                                None -> {}
+                                arg -> { push_expr_list(args, arg^) }
+                            }
+                            while check_token(p^.current_token^.kind, "Comma") {
+                                advance_parser(p)
+                                let n_opt = parse_expression(p)
+                                when n_opt {
+                                    None -> {}
+                                    n -> { push_expr_list(args, n^) }
+                                }
+                            }
+                        }
+                        let end_line = p^.current_token^.line
+                        let end_col = p^.current_token^.col
+                        consume(p, "RParen", "Expected ')' after function arguments")
+                        
+                        mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, end_line, end_col)
+                        
+                        mut call = alloc FunctionCall()
+                        call^.callee = left
+                        call^.arguments = args
+                        
+                        mut expr = alloc Spanned(Expression)()
+                        expr^.span = span
+                        mut p_ptr = alloc FunctionCall()
+                        p_ptr^ = call^
+                        expr^.node = Expression.Call(p_ptr)
+                        
+                        left = expr
+                    } else {
+                        if check_token(p^.current_token^.kind, "Caret") {
+                            advance_parser(p)
+                            mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, p^.current_token^.line, p^.current_token^.col)
+                            
+                            mut expr = alloc Spanned(Expression)()
+                            expr^.span = span
+                            expr^.node = Expression.Deref(left)
+                            
+                            left = expr
+                        } else {
+                            if check_token(p^.current_token^.kind, "LBracket") {
+                                advance_parser(p)
+                                mut start_expr: ?^Spanned(Expression) = None
+                                mut end_expr: ?^Spanned(Expression) = None
+                                mut is_slice = false
+                                
+                                if not check_token(p^.current_token^.kind, "RBracket") {
+                                    if check_token(p^.current_token^.kind, "DotDot") {
+                                        is_slice = true
+                                        advance_parser(p)
+                                        if not check_token(p^.current_token^.kind, "RBracket") {
+                                            end_expr = parse_expression(p)
+                                        }
+                                    } else {
+                                        start_expr = parse_expression(p)
+                                        if check_token(p^.current_token^.kind, "DotDot") {
+                                            is_slice = true
+                                            advance_parser(p)
+                                            if not check_token(p^.current_token^.kind, "RBracket") {
+                                                end_expr = parse_expression(p)
+                                            }
+                                        } else {
+                                            if not check_token(p^.current_token^.kind, "RBracket") {
+                                                mut span_err = alloc_span(p^.current_token^.line, p^.current_token^.col, p^.current_token^.line, p^.current_token^.col)
+                                                report_error(p, span_err, "Expected '..' for slice or ']' for index")
+                                                mut ret: ?^Spanned(Expression) = None
+                                                return ret
+                                            } else {
+                                                let end_line = p^.current_token^.line
+                                                let end_col = p^.current_token^.col
+                                                advance_parser(p) // consume RBracket
+                                                
+                                                mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, end_line, end_col)
+                                                
+                                                when start_expr {
+                                                    None -> {} // unreachable
+                                                    idx -> {
+                                                        mut idx_expr = alloc IndexExpr()
+                                                        idx_expr^.target = left
+                                                        idx_expr^.index = idx
+                                                        
+                                                        mut expr = alloc Spanned(Expression)()
+                                                        expr^.span = span
+                                                        mut p_ptr = alloc IndexExpr()
+                                                        p_ptr^ = idx_expr^
+                                                        expr^.node = Expression.Index(p_ptr)
+                                                        left = expr
+                                                    }
+                                                }
+                                                // skip to next iteration
+                                                parsing = true // keep it true to bypass
+                                                // Nera lacks continue!
+                                                // Hack: do nothing and the loop continues naturally, but we have to ensure we don't break below.
+                                                // We don't break, so it naturally loops
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    is_slice = true
+                                }
+                                
+                                if is_slice {
+                                    let end_line = p^.current_token^.line
+                                    let end_col = p^.current_token^.col
+                                    consume(p, "RBracket", "Expected ']' after slice/index")
+                                    
+                                    mut span = alloc_span(left^.span^.start_line, left^.span^.start_col, end_line, end_col)
+                                    
+                                    mut slice = alloc VectorSliceExpr()
+                                    slice^.target = left
+                                    slice^.start = start_expr
+                                    slice^.end = end_expr
+                                    
+                                    mut expr = alloc Spanned(Expression)()
+                                    expr^.span = span
+                                    mut p_ptr = alloc VectorSliceExpr()
+                                    p_ptr^ = slice^
+                                    expr^.node = Expression.VectorSlice(p_ptr)
+                                    left = expr
+                                }
+                            } else {
+                                parsing = false
+                            }
+                        }
+                    }
+                }
+            }
+            mut ret: ?^Spanned(Expression) = None
+            ret = left
+            return ret
+        }
+    }
+}
+
+
+fn parse_when_expr(mut p: ^Parser) -> ?^WhenExpr {
+    consume(p, "When", "Expected 'when'")
+    
+    let target_opt = parse_expression(p)
+    mut target: ?^Spanned(Expression) = None
+    when target_opt {
+        None -> {
+            mut ret: ?^WhenExpr = None
+            return ret
+        }
+        t -> { target = t }
+    }
+    
+    consume(p, "LBrace", "Expected '{' before when cases")
+    
+    mut dummy_case = alloc WhenCase()
+    mut cases = new_list(4, dummy_case)
+    
+    while not check_token(p^.current_token^.kind, "RBrace") and not check_token(p^.current_token^.kind, "Eof") {
+        mut variant_name = ""
+        if check_token(p^.current_token^.kind, "NoneLiteral") {
+            variant_name = "None"
+            advance_parser(p)
+        } else {
+            variant_name = consume_ident(p, "Expected variant name in when case")
+            if variant_name == "" {
+                mut ret: ?^WhenExpr = None
+                return ret
+            }
+        }
+        
+        mut dummy_str = alloc String()
+        mut bindings = new_list(2, dummy_str)
+        
+        if check_token(p^.current_token^.kind, "LParen") {
+            advance_parser(p)
+            if not check_token(p^.current_token^.kind, "RParen") {
+                let bn = consume_ident(p, "Expected identifier for binding")
+                if bn == "" {
+                    mut ret: ?^WhenExpr = None
+                    return ret
+                }
+                list_push(bindings, bn)
+                
+                while check_token(p^.current_token^.kind, "Comma") {
+                    advance_parser(p)
+                    if not check_token(p^.current_token^.kind, "RParen") {
+                        let bn2 = consume_ident(p, "Expected identifier for binding")
+                        if bn2 == "" {
+                            mut ret: ?^WhenExpr = None
+                            return ret
+                        }
+                        list_push(bindings, bn2)
+                    }
+                }
+            }
+            consume(p, "RParen", "Expected ')' after bindings")
+        }
+        
+        consume(p, "Arrow", "Expected '->' after when case pattern")
+        
+        let body_opt = parse_block(p)
+        when body_opt {
+            None -> {
+                mut ret: ?^WhenExpr = None
+                return ret
+            }
+            b -> {
+                mut case_decl = alloc WhenCase()
+                case_decl^.variant_name = variant_name
+                case_decl^.bindings = bindings
+                case_decl^.body = b
+                list_push(cases, case_decl^)
+            }
+        }
+        
+        if check_token(p^.current_token^.kind, "Comma") {
+            advance_parser(p)
+        }
+    }
+    
+    consume(p, "RBrace", "Expected '}' after when cases")
+    
+    when target {
+        None -> {} // unreachable
+        t -> {
+            mut expr = alloc WhenExpr()
+            expr^.target = t
+            expr^.cases = cases
+            expr^.is_nullable = false
+            mut ret: ?^WhenExpr = None
+            ret = expr
+            return ret
+        }
+    }
+    mut ret: ?^WhenExpr = None
+    return ret
+}
+
+fn parse_primary_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
+    let start_line = p^.current_token^.line
+    let start_col = p^.current_token^.col
+    
+    mut prim_opt: ?PrimaryExpr = None
+    
+    when p^.current_token^.kind {
+        Identifier(val) -> {
+            advance_parser(p)
+            prim_opt = PrimaryExpr.Identifier(val)
+        }
+        Integer(val) -> {
+            advance_parser(p)
+            prim_opt = PrimaryExpr.Integer(val)
+        }
+        Float(val) -> {
+            advance_parser(p)
+            prim_opt = PrimaryExpr.Float(val)
+        }
+        StringLiteral(val) -> {
+            advance_parser(p)
+            prim_opt = PrimaryExpr.StringLiteral(val)
+        }
+        CharLiteral(val) -> {
+            advance_parser(p)
+            prim_opt = PrimaryExpr.CharLiteral(val)
+        }
+        True -> {
+            advance_parser(p)
+            prim_opt = PrimaryExpr.Boolean(true)
+        }
+        False -> {
+            advance_parser(p)
+            prim_opt = PrimaryExpr.Boolean(false)
+        }
+        NoneLiteral -> {
+            advance_parser(p)
+            prim_opt = PrimaryExpr.NoneLiteral
+        }
+        LBracket -> {
+            advance_parser(p)
+            mut args = new_empty_expr_list()
+            if not check_token(p^.current_token^.kind, "RBracket") {
+                let a_opt = parse_expression(p)
+                when a_opt {
+                    None -> {}
+                    a -> { push_expr_list(args, a^) }
+                }
+                while check_token(p^.current_token^.kind, "Comma") {
+                    advance_parser(p)
+                    let n_opt = parse_expression(p)
+                    when n_opt {
+                        None -> {}
+                        n -> { push_expr_list(args, n^) }
+                    }
+                }
+            }
+            consume(p, "RBracket", "Expected ']' after list literal")
+            prim_opt = PrimaryExpr.ListLiteral(args)
+        }
+        LParen -> {
+            advance_parser(p)
+            let inner_opt = parse_expression(p)
+            consume(p, "RParen", "Expected ')' after grouped expression")
+            when inner_opt {
+                None -> {}
+                inner -> {
+                    mut p_ptr = alloc Spanned(Expression)()
+                    p_ptr^ = inner^
+                    prim_opt = PrimaryExpr.Grouped(p_ptr)
+                }
+            }
+        }
+        When -> {
+            let when_opt = parse_when_expr(p)
+            when when_opt {
+                None -> {
+                    mut ret: ?^Spanned(Expression) = None
+                    return ret
+                }
+                w -> {
+                    mut span = alloc_span(start_line, start_col, p^.current_token^.line, p^.current_token^.col)
+                    mut expr = alloc Spanned(Expression)()
+                    expr^.span = span
+                    mut p_ptr = alloc WhenExpr()
+                    p_ptr^ = w^
+                    expr^.node = Expression.When(p_ptr)
+                    mut ret: ?^Spanned(Expression) = None
+                    ret = expr
+                    return ret
+                }
+            }
+        }
+        Alloc -> {
+            mut end_line = start_line
+            mut end_col = start_col
+            advance_parser(p)
+            let ty_opt = parse_type(p)
+            when ty_opt {
+                None -> {
+                    mut span = alloc_span(start_line, start_col, p^.current_token^.line, p^.current_token^.col)
+                    report_error(p, span, "Expected type after 'alloc'")
+                    mut ret: ?^Spanned(Expression) = None
+                    return ret
+                }
+                ty -> {
+                    mut args = new_empty_expr_list()
+                    
+                    if check_token(p^.current_token^.kind, "LParen") {
+                        advance_parser(p)
+                        if not check_token(p^.current_token^.kind, "RParen") {
+                            let a_opt = parse_expression(p)
+                            when a_opt {
+                                None -> {}
+                                a -> { push_expr_list(args, a^) }
+                            }
+                            while check_token(p^.current_token^.kind, "Comma") {
+                                advance_parser(p)
+                                let n_opt = parse_expression(p)
+                                when n_opt {
+                                    None -> {}
+                                    n -> { push_expr_list(args, n^) }
+                                }
+                            }
+                        }
+                        end_line = p^.current_token^.line
+                        end_col = p^.current_token^.col
+                        consume(p, "RParen", "Expected ')' after alloc arguments")
+                    } else {
+                        end_line = ty^.span^.end_line
+                        end_col = ty^.span^.end_col
+                    }
+                    
+                    mut span = alloc_span(start_line, start_col, end_line, end_col)
+                    mut alloc_ex = alloc AllocExpr()
+                    alloc_ex^.ty = ty
+                    alloc_ex^.arguments = args
+                    
+                    mut expr = alloc Spanned(Expression)()
+                    expr^.span = span
+                    mut p_ptr = alloc AllocExpr()
+                    p_ptr^ = alloc_ex^
+                    expr^.node = Expression.Alloc(p_ptr)
+                    mut ret: ?^Spanned(Expression) = None
+                    ret = expr
+                    return ret
+                }
+            }
+        }
+        // Dummy cases for exhaustiveness
+
+        Data -> {} Fn -> {} Let -> {} Mut -> {} If -> {} Else -> {} While -> {} Return -> {} Break -> {} Continue -> {}
+        Use -> {} Extern -> {} Choice -> {} And -> {} Or -> {} Not -> {} BitAnd -> {} BitOr -> {} BitXor -> {} Shl -> {} Shr -> {} As -> {}
+        Assign -> {} AddAssign -> {} SubAssign -> {} MulAssign -> {} DivAssign -> {} Eq -> {} NotEq -> {} Lt -> {} LtEq -> {} Gt -> {} GtEq -> {}
+        Add -> {} Sub -> {} Mul -> {} Div -> {} Mod -> {} Pipe -> {} Arrow -> {} Caret -> {} Question -> {} Free -> {}
+        LBrace -> {} RBrace -> {} Colon -> {} Comma -> {} Dot -> {} DotDot -> {} Error(val) -> {} Eof -> {} RParen -> {} RBracket -> {}
+
+    }
+    
+    when prim_opt {
+        None -> {
+            mut span = alloc_span(start_line, start_col, p^.current_token^.line, p^.current_token^.col)
+            report_error(p, span, "Unexpected token in primary expression")
+            mut ret: ?^Spanned(Expression) = None
+            return ret
+        }
+        prim -> {
+            mut span = alloc_span(start_line, start_col, p^.current_token^.line, p^.current_token^.col)
+            mut expr = alloc Spanned(Expression)()
+            expr^.span = span
+            mut p_ptr = alloc PrimaryExpr()
+            p_ptr^ = prim
+            expr^.node = Expression.Primary(p_ptr)
+            mut ret: ?^Spanned(Expression) = None
+            ret = expr
+            return ret
+        }
+    }
+}
+

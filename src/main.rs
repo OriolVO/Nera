@@ -27,21 +27,25 @@ fn run_compiler(command: &str, filename: &str, program_args: &[String]) -> Resul
     let source = fs::read_to_string(filename)?;
 
     // Frontend: AST Stitching (Module Imports)
-    let mut visited = std::collections::HashSet::new();
     let mut pending = vec![filename.to_string()];
     let mut all_declarations = Vec::new();
 
+    let mut parsed_programs = std::collections::HashMap::new();
+    let mut deps: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+
     while let Some(current_file) = pending.pop() {
-        if !visited.insert(current_file.clone()) {
+        if parsed_programs.contains_key(&current_file) {
             continue; // Already processed this file, skip to prevent cyclic loops
         }
 
-        let source = if current_file == filename {
-            source.clone()
-        } else {
-            fs::read_to_string(&current_file)?
+        let contents = match std::fs::read_to_string(&current_file) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("WARNING: Failed to load file '{}': {}", current_file, e);
+                continue;
+            }
         };
-        let source_leaked: &'static str = Box::leak(source.into_boxed_str());
+        let source_leaked: &'static str = Box::leak(contents.into_boxed_str());
 
         let lexer = Lexer::new(source_leaked);
         let mut parser = Parser::new(source_leaked, lexer);
@@ -51,15 +55,41 @@ fn run_compiler(command: &str, filename: &str, program_args: &[String]) -> Resul
             return Err(CompileError::SyntaxError(parser.errors));
         }
 
-        // Queue up nested imports
+        let mut file_deps = Vec::new();
         for import in &program.imports {
             let path_str = import.node.path.join("/");
             let dep_filename = format!("{}.nera", path_str);
-            pending.push(dep_filename);
+            pending.push(dep_filename.clone());
+            file_deps.push(dep_filename);
         }
 
-        all_declarations.append(&mut program.declarations);
+        parsed_programs.insert(current_file.clone(), program);
+        deps.insert(current_file, file_deps);
     }
+
+    // 2. Post-order traversal to build all_declarations
+    fn post_order_collect(
+        file: &str, 
+        deps: &std::collections::HashMap<String, Vec<String>>, 
+        parsed: &mut std::collections::HashMap<String, crate::frontend::ast::Program>,
+        visited: &mut std::collections::HashSet<String>,
+        all_decls: &mut Vec<crate::frontend::diagnostics::Spanned<crate::frontend::ast::Declaration>>
+    ) {
+        if !visited.insert(file.to_string()) {
+            return;
+        }
+        if let Some(file_deps) = deps.get(file) {
+            for dep in file_deps {
+                post_order_collect(dep, deps, parsed, visited, all_decls);
+            }
+        }
+        if let Some(mut program) = parsed.remove(file) {
+            all_decls.append(&mut program.declarations);
+        }
+    }
+
+    let mut visited_post = std::collections::HashSet::new();
+    post_order_collect(filename, &deps, &mut parsed_programs, &mut visited_post, &mut all_declarations);
 
     // Create a synthetic master program
     let mut master_program = crate::frontend::ast::Program {

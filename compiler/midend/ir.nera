@@ -1,0 +1,72 @@
+// compiler/midend/ir.nera
+use std.collections
+use compiler.frontend.ast
+
+choice IROperand {
+    LiteralInt(Int),
+    LiteralFloat(Float),
+    LiteralString(String),
+    LiteralChar(Char),
+    LiteralBool(Boolean),
+    Variable(String),
+    TempReg(Int),
+    Void,
+    NoneLiteral
+}
+
+choice Terminator {
+    Jump(String),
+    Branch(^IROperand, String, String),
+    Return(?^IROperand),
+    None
+}
+
+data BasicBlock {
+    name: String
+    instrs: ^List(IRInstruction)
+    terminator: Terminator
+}
+
+data IRFunction {
+    name: String
+    params: ^List(String)
+    return_type: String
+    blocks: ^List(BasicBlock)
+    is_extern: Boolean
+}
+
+choice VectorOperand {
+    Scalar(^IROperand),
+    Vector(String, String)
+}
+
+data FlatVectorApplyOp {
+    prop: String
+    op: AssignOp
+    operand: VectorOperand
+}
+
+choice IRInstruction {
+    Assign(^IROperand, ^IROperand),
+    UnaryOp(^IROperand, UnaryOp, ^IROperand),
+    BinaryOp(^IROperand, BinaryOp, ^IROperand, ^IROperand),
+    LoadProperty(^IROperand, ^IROperand, String),
+    StoreProperty(^IROperand, String, ^IROperand),
+    Call(?^IROperand, ^IROperand, ^List(IROperand)),
+    FlatVectorApply(String, ^List(FlatVectorApplyOp), ^IROperand, ^IROperand, Int),
+    ExtractTag(^IROperand, ^IROperand),
+    ExtractPayload(^IROperand, ^IROperand, Int),
+    ConstructADT(^IROperand, Int, ^List(IROperand)),
+    Alloc(^IROperand, String, Int),
+    Free(^IROperand),
+    LoadPointer(^IROperand, ^IROperand),
+    StorePointer(^IROperand, ^IROperand),
+    LoadStructField(^IROperand, ^IROperand, Int, String),
+    StoreStructField(^IROperand, Int, ^IROperand),
+    LoadArrayElement(^IROperand, String, String, ^IROperand, Int),
+    StoreArrayElement(String, String, ^IROperand, ^IROperand, Int),
+    LoadStringChar(^IROperand, ^IROperand, ^IROperand),
+    Substring(^IROperand, ^IROperand, ^IROperand, ^IROperand),
+    StringCompare(^IROperand, ^IROperand, ^IROperand, Boolean),
+    Cast(^IROperand, String, ^IROperand)
+}

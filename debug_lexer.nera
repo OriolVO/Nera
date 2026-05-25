@@ -1,0 +1,36 @@
+use std.io
+
+choice TokenKind { Let, Ident(String), Assign, Int(Int), Mut, Error(String), Eof }
+
+struct Token {
+    kind: TokenKind
+}
+
+struct Lexer {
+    source: String,
+    pos: Int
+}
+
+fn alloc_lexer(src: String) -> Lexer* {
+    mut l = alloc Lexer
+    l^.source = src
+    l^.pos = 0
+    return l
+}
+
+fn next_token(l: Lexer*) -> Token* {
+    mut t = alloc Token
+    t^.kind = TokenKind.Let
+    return t
+}
+
+fn get_id(k: TokenKind) -> Int {
+    when k { Let => 3, Ident(s) => 26, Assign => 31, Int(v) => 42, Mut => 4, Error(s) => 64, Eof => 65 }
+}
+
+fn main() {
+    let source = "let x = 42"
+    mut lex = alloc_lexer(source)
+    let tok1 = next_token(lex)
+    print(get_id(tok1^.kind))
+}

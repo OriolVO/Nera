@@ -1,0 +1,354 @@
+use compiler.frontend.ast
+
+data TypeInfoArray {
+    inner: ^TypeInfo
+    size: ?Int
+}
+
+choice TypeInfo {
+    Int,
+    Float,
+    Boolean,
+    String,
+    Char,
+    Void,
+    Array(^TypeInfoArray),
+    Custom(String),
+    Unknown,
+    Pointer(^TypeInfo),
+    Nullable(^TypeInfo),
+    NoneVariant
+}
+
+fn type_info_from_ast(ty: ^Type) -> ^TypeInfo {
+    mut base = TypeInfo.Unknown
+    
+    if ty^.name == "Int" {
+        base = TypeInfo.Int
+    } else if ty^.name == "Float" {
+        base = TypeInfo.Float
+    } else if ty^.name == "Boolean" {
+        base = TypeInfo.Boolean
+    } else if ty^.name == "String" {
+        base = TypeInfo.String
+    } else if ty^.name == "Char" {
+        base = TypeInfo.Char
+    } else if ty^.name == "Void" {
+        base = TypeInfo.Void
+    } else if ty^.name == "Unknown" {
+        base = TypeInfo.Unknown
+    } else {
+        base = TypeInfo.Custom(ty^.name)
+    }
+    
+    mut resolved = base
+    if ty^.is_array {
+        mut arr = alloc TypeInfoArray()
+        mut inner_box = alloc TypeInfo()
+        inner_box^ = base
+        arr^.inner = inner_box
+        arr^.size = ty^.array_size
+        resolved = TypeInfo.Array(arr)
+    }
+    
+    if ty^.is_ptr {
+        mut inner_box = alloc TypeInfo()
+        inner_box^ = resolved
+        resolved = TypeInfo.Pointer(inner_box)
+    }
+    
+    if ty^.is_nullable {
+        mut inner_box = alloc TypeInfo()
+        inner_box^ = resolved
+        resolved = TypeInfo.Nullable(inner_box)
+    }
+    
+    mut ret = alloc TypeInfo()
+    ret^ = resolved
+    return ret
+}
+
+fn type_info_to_string(info: ^TypeInfo) -> String {
+    when info^ {
+        Int -> { return "Int" }
+        Float -> { return "Float" }
+        Boolean -> { return "Boolean" }
+        String -> { return "String" }
+        Char -> { return "Char" }
+        Void -> { return "Void" }
+        Array(arr) -> { 
+            let inner_str = type_info_to_string(arr^.inner)
+            return inner_str + "[]" 
+        }
+        Custom(name) -> { return name }
+        Unknown -> { return "Unknown" }
+        Pointer(inner) -> {
+            let inner_str = type_info_to_string(inner)
+            return "^" + inner_str
+        }
+        Nullable(inner) -> {
+            let inner_str = type_info_to_string(inner)
+            return "?" + inner_str
+        }
+        NoneVariant -> { return "None" }
+    }
+    return "Unknown"
+}
+
+
+fn type_info_equals(a: ^TypeInfo, b: ^TypeInfo) -> Boolean {
+    when a^ {
+        Int -> {
+            when b^ {
+                Int -> { return true }
+                Float -> { return false }
+                Boolean -> { return false }
+                String -> { return false }
+                Char -> { return false }
+                Void -> { return false }
+                Array(arr_b) -> { return false }
+                Custom(name_b) -> { return false }
+                Unknown -> { return false }
+                Pointer(inner_b) -> { return false }
+                Nullable(inner_b) -> { return false }
+                NoneVariant -> { return false }
+            }
+        }
+        Float -> {
+            when b^ {
+                Int -> { return false }
+                Float -> { return true }
+                Boolean -> { return false }
+                String -> { return false }
+                Char -> { return false }
+                Void -> { return false }
+                Array(arr_b) -> { return false }
+                Custom(name_b) -> { return false }
+                Unknown -> { return false }
+                Pointer(inner_b) -> { return false }
+                Nullable(inner_b) -> { return false }
+                NoneVariant -> { return false }
+            }
+        }
+        Boolean -> {
+            when b^ {
+                Int -> { return false }
+                Float -> { return false }
+                Boolean -> { return true }
+                String -> { return false }
+                Char -> { return false }
+                Void -> { return false }
+                Array(arr_b) -> { return false }
+                Custom(name_b) -> { return false }
+                Unknown -> { return false }
+                Pointer(inner_b) -> { return false }
+                Nullable(inner_b) -> { return false }
+                NoneVariant -> { return false }
+            }
+        }
+        String -> {
+            when b^ {
+                Int -> { return false }
+                Float -> { return false }
+                Boolean -> { return false }
+                String -> { return true }
+                Char -> { return false }
+                Void -> { return false }
+                Array(arr_b) -> { return false }
+                Custom(name_b) -> { return false }
+                Unknown -> { return false }
+                Pointer(inner_b) -> { return false }
+                Nullable(inner_b) -> { return false }
+                NoneVariant -> { return false }
+            }
+        }
+        Char -> {
+            when b^ {
+                Int -> { return false }
+                Float -> { return false }
+                Boolean -> { return false }
+                String -> { return false }
+                Char -> { return true }
+                Void -> { return false }
+                Array(arr_b) -> { return false }
+                Custom(name_b) -> { return false }
+                Unknown -> { return false }
+                Pointer(inner_b) -> { return false }
+                Nullable(inner_b) -> { return false }
+                NoneVariant -> { return false }
+            }
+        }
+        Void -> {
+            when b^ {
+                Int -> { return false }
+                Float -> { return false }
+                Boolean -> { return false }
+                String -> { return false }
+                Char -> { return false }
+                Void -> { return true }
+                Array(arr_b) -> { return false }
+                Custom(name_b) -> { return false }
+                Unknown -> { return false }
+                Pointer(inner_b) -> { return false }
+                Nullable(inner_b) -> { return false }
+                NoneVariant -> { return false }
+            }
+        }
+        Array(arr_a) -> {
+            when b^ {
+                Int -> { return false }
+                Float -> { return false }
+                Boolean -> { return false }
+                String -> { return false }
+                Char -> { return false }
+                Void -> { return false }
+                Array(arr_b) -> {
+                    let size_a: ?Int = arr_a^.size
+                    let size_b: ?Int = arr_b^.size
+                    when size_a {
+                        None -> {
+                            when size_b {
+                                None -> { }
+                                s -> { return false }
+                            }
+                        }
+                        sa -> {
+                            when size_b {
+                                None -> { return false }
+                                sb -> { if sa != sb { return false } }
+                            }
+                        }
+                    }
+                    return type_info_equals(arr_a^.inner, arr_b^.inner)
+                }
+                Custom(name_b) -> { return false }
+                Unknown -> { return false }
+                Pointer(inner_b) -> { return false }
+                Nullable(inner_b) -> { return false }
+                NoneVariant -> { return false }
+            }
+        }
+        Custom(name_a) -> {
+            when b^ {
+                Int -> { return false }
+                Float -> { return false }
+                Boolean -> { return false }
+                String -> { return false }
+                Char -> { return false }
+                Void -> { return false }
+                Array(arr_b) -> { return false }
+                Custom(name_b) -> { return name_a == name_b }
+                Unknown -> { return false }
+                Pointer(inner_b) -> { return false }
+                Nullable(inner_b) -> { return false }
+                NoneVariant -> { return false }
+            }
+        }
+        Unknown -> {
+            when b^ {
+                Int -> { return false }
+                Float -> { return false }
+                Boolean -> { return false }
+                String -> { return false }
+                Char -> { return false }
+                Void -> { return false }
+                Array(arr_b) -> { return false }
+                Custom(name_b) -> { return false }
+                Unknown -> { return true }
+                Pointer(inner_b) -> { return false }
+                Nullable(inner_b) -> { return false }
+                NoneVariant -> { return false }
+            }
+        }
+        Pointer(inner_a) -> {
+            when b^ {
+                Int -> { return false }
+                Float -> { return false }
+                Boolean -> { return false }
+                String -> { return false }
+                Char -> { return false }
+                Void -> { return false }
+                Array(arr_b) -> { return false }
+                Custom(name_b) -> { return false }
+                Unknown -> { return false }
+                Pointer(inner_b) -> { return type_info_equals(inner_a, inner_b) }
+                Nullable(inner_b) -> { return false }
+                NoneVariant -> { return false }
+            }
+        }
+        Nullable(inner_a) -> {
+            when b^ {
+                Int -> { return false }
+                Float -> { return false }
+                Boolean -> { return false }
+                String -> { return false }
+                Char -> { return false }
+                Void -> { return false }
+                Array(arr_b) -> { return false }
+                Custom(name_b) -> { return false }
+                Unknown -> { return false }
+                Pointer(inner_b) -> { return false }
+                Nullable(inner_b) -> { return type_info_equals(inner_a, inner_b) }
+                NoneVariant -> { return false }
+            }
+        }
+        NoneVariant -> {
+            when b^ {
+                Int -> { return false }
+                Float -> { return false }
+                Boolean -> { return false }
+                String -> { return false }
+                Char -> { return false }
+                Void -> { return false }
+                Array(arr_b) -> { return false }
+                Custom(name_b) -> { return false }
+                Unknown -> { return false }
+                Pointer(inner_b) -> { return false }
+                Nullable(inner_b) -> { return false }
+                NoneVariant -> { return true }
+            }
+        }
+    }
+    return false
+}
+
+fn type_info_is_array(info: ^TypeInfo) -> Boolean {
+    when info^ {
+        Int -> { return false }
+        Float -> { return false }
+        Boolean -> { return false }
+        String -> { return false }
+        Char -> { return false }
+        Void -> { return false }
+        Array(arr) -> { return true }
+        Custom(name_c) -> { return false }
+        Unknown -> { return false }
+        Pointer(inner_c) -> { return false }
+        Nullable(inner_c) -> { return false }
+        NoneVariant -> { return false }
+    }
+    return false
+}
+
+fn type_info_get_array_inner(info: ^TypeInfo) -> ?^TypeInfo {
+    when info^ {
+        Int -> { }
+        Float -> { }
+        Boolean -> { }
+        String -> { }
+        Char -> { }
+        Void -> { }
+        Array(arr) -> { 
+            mut ret: ?^TypeInfo = None
+            ret = arr^.inner
+            return ret 
+        }
+        Custom(name_c) -> { }
+        Unknown -> { }
+        Pointer(inner_c) -> { }
+        Nullable(inner_c) -> { }
+        NoneVariant -> { }
+    }
+    mut ret: ?^TypeInfo = None
+    return ret
+}

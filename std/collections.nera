@@ -64,3 +64,70 @@ fn list_free(T)(list: ^List(T)) {
     }
     // We don't have free for objects yet, so we just leak the List wrapper for now!
 }
+
+data MapEntry(V) {
+    key: String
+    value: V
+}
+
+data HashMap(V) {
+    entries: ^List(MapEntry(V))
+}
+
+fn new_hashmap(V)(dummy: ^V) -> ^HashMap(V) {
+    mut map = alloc HashMap(V)()
+    mut dummy_entry = alloc MapEntry(V)()
+    map^.entries = new_list(10, dummy_entry)
+    return map
+}
+
+fn string_eq(s1: String, s2: String) -> Boolean {
+    // We can rely on the compiler converting == for strings to StringEq in midend
+    return s1 == s2
+}
+
+fn hashmap_put(V)(map: ^HashMap(V), key: String, value: V) {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            mut updated_entry = alloc MapEntry(V)()
+            updated_entry^.key = key
+            updated_entry^.value = value
+            list_set(map^.entries, i, updated_entry^)
+            return
+        }
+        i = i + 1
+    }
+    
+    mut new_entry = alloc MapEntry(V)()
+    new_entry^.key = key
+    new_entry^.value = value
+    list_push(map^.entries, new_entry^)
+}
+
+fn hashmap_get(V)(map: ^HashMap(V), key: String) -> ?V {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            mut ret: ?V = entry.value
+            return ret
+        }
+        i = i + 1
+    }
+    mut none_ret: ?V = None
+    return none_ret
+}
+
+fn hashmap_contains(V)(map: ^HashMap(V), key: String) -> Boolean {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}

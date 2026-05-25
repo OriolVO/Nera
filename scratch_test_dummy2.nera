@@ -1,0 +1,8 @@
+use std.io
+
+data MyData { val: Int }
+
+fn main() -> Int {
+    mut dummy_ptr = alloc ^MyData()
+    return 0
+}

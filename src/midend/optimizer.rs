@@ -2,6 +2,7 @@ use std::collections::{HashSet, HashMap};
 use super::ir::{IRInstruction, IROperand, IRFunction, Terminator, VectorOperand};
 use crate::error::CompileError;
 
+#[derive(Debug, Clone)]
 pub struct OptimizedIR {
     pub functions: Vec<IRFunction>,
     pub soa_arrays: Vec<(String, i64)>, // Array names and their sizes
@@ -106,7 +107,7 @@ impl IROptimizer {
     fn operand_to_var(&self, op: &IROperand) -> Option<String> {
         match op {
             IROperand::Variable(name) => Some(name.clone()),
-            IROperand::TempReg(r) => Some(format!("t{}", r)),
+            IROperand::TempReg(r) => Some(format!("%t{}", r)),
             _ => None,
         }
     }

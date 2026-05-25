@@ -1,7 +1,6 @@
 // compiler/frontend/lexer.nera
 use std.string
 
-
 choice TokenKind {
     // Keywords
     Data, Fn, Let, Mut,
@@ -142,7 +141,6 @@ fn make_token(kind: TokenKind, line: Int, col: Int) -> ^Token {
     return tok
 }
 
-// Minimal implementation to test compilation
 fn next_token(mut lex: ^Lexer) -> ^Token {
     skip_whitespace(lex)
     
@@ -155,14 +153,39 @@ fn next_token(mut lex: ^Lexer) -> ^Token {
     
     let c = advance(lex)
     
-    if c == '+' { return make_token(TokenKind.Add, start_line, start_col) }
+    if c == '+' {
+        if peek(lex) == '=' {
+            advance(lex)
+            return make_token(TokenKind.AddAssign, start_line, start_col)
+        }
+        return make_token(TokenKind.Add, start_line, start_col)
+    }
     if c == '-' {
         if peek(lex) == '>' {
             advance(lex)
             return make_token(TokenKind.Arrow, start_line, start_col)
         }
+        if peek(lex) == '=' {
+            advance(lex)
+            return make_token(TokenKind.SubAssign, start_line, start_col)
+        }
         return make_token(TokenKind.Sub, start_line, start_col)
     }
+    if c == '*' {
+        if peek(lex) == '=' {
+            advance(lex)
+            return make_token(TokenKind.MulAssign, start_line, start_col)
+        }
+        return make_token(TokenKind.Mul, start_line, start_col)
+    }
+    if c == '/' {
+        if peek(lex) == '=' {
+            advance(lex)
+            return make_token(TokenKind.DivAssign, start_line, start_col)
+        }
+        return make_token(TokenKind.Div, start_line, start_col)
+    }
+    if c == '%' { return make_token(TokenKind.Mod, start_line, start_col) }
     if c == '=' {
         if peek(lex) == '=' {
             advance(lex)
@@ -170,39 +193,182 @@ fn next_token(mut lex: ^Lexer) -> ^Token {
         }
         return make_token(TokenKind.Assign, start_line, start_col)
     }
+    if c == '!' {
+        if peek(lex) == '=' {
+            advance(lex)
+            return make_token(TokenKind.NotEq, start_line, start_col)
+        }
+        return make_token(TokenKind.Error("Unexpected character !"), start_line, start_col)
+    }
+    if c == '<' {
+        if peek(lex) == '=' {
+            advance(lex)
+            return make_token(TokenKind.LtEq, start_line, start_col)
+        }
+        return make_token(TokenKind.Lt, start_line, start_col)
+    }
+    if c == '>' {
+        if peek(lex) == '=' {
+            advance(lex)
+            return make_token(TokenKind.GtEq, start_line, start_col)
+        }
+        if peek(lex) == '>' {
+            advance(lex)
+            return make_token(TokenKind.Pipe, start_line, start_col)
+        }
+        return make_token(TokenKind.Gt, start_line, start_col)
+    }
+    if c == '^' { return make_token(TokenKind.Caret, start_line, start_col) }
+    if c == '?' { return make_token(TokenKind.Question, start_line, start_col) }
     
+    if c == '{' { return make_token(TokenKind.LBrace, start_line, start_col) }
+    if c == '}' { return make_token(TokenKind.RBrace, start_line, start_col) }
+    if c == '[' { return make_token(TokenKind.LBracket, start_line, start_col) }
+    if c == ']' { return make_token(TokenKind.RBracket, start_line, start_col) }
+    if c == '(' { return make_token(TokenKind.LParen, start_line, start_col) }
+    if c == ')' { return make_token(TokenKind.RParen, start_line, start_col) }
+    if c == ':' { return make_token(TokenKind.Colon, start_line, start_col) }
+    if c == ',' { return make_token(TokenKind.Comma, start_line, start_col) }
+    if c == '.' {
+        if peek(lex) == '.' {
+            advance(lex)
+            return make_token(TokenKind.DotDot, start_line, start_col)
+        }
+        return make_token(TokenKind.Dot, start_line, start_col)
+    }
+
+    if c == '"' {
+        let start_pos = lex^.pos
+        while not is_at_end(lex) and peek(lex) != '"' {
+            if peek(lex) == '\\' {
+                advance(lex)
+            }
+            advance(lex)
+        }
+        if is_at_end(lex) {
+            return make_token(TokenKind.Error("Unterminated string literal"), start_line, start_col)
+        }
+        let end_pos = lex^.pos
+        advance(lex)
+        let str_val = lex^.source[start_pos..end_pos]
+        return make_token(TokenKind.StringLiteral(str_val), start_line, start_col)
+    }
+
+    if c == '\'' {
+        if is_at_end(lex) {
+            return make_token(TokenKind.Error("Unterminated character literal"), start_line, start_col)
+        }
+        mut char_val = advance(lex)
+        if char_val == '\\' {
+            if is_at_end(lex) {
+                return make_token(TokenKind.Error("Unterminated escape sequence"), start_line, start_col)
+            }
+            let esc = advance(lex)
+            if esc == 'n' { char_val = '\n' }
+            if esc == 'r' { char_val = '\r' }
+            if esc == 't' { char_val = '\t' }
+            if esc == '\\' { char_val = '\\' }
+            if esc == '"' { char_val = '"' }
+            if esc == '\'' { char_val = '\'' }
+            if esc == '0' { char_val = '\0' }
+            if esc != 'n' and esc != 'r' and esc != 't' and esc != '\\' and esc != '"' and esc != '\'' and esc != '0' {
+                return make_token(TokenKind.Error("Invalid escape sequence"), start_line, start_col)
+            }
+        }
+        if peek(lex) == '\'' {
+            advance(lex)
+            return make_token(TokenKind.CharLiteral(char_val), start_line, start_col)
+        }
+        return make_token(TokenKind.Error("Expected closing quote for character literal"), start_line, start_col)
+    }
+
     if is_alpha(c) {
-        // Collect identifier
         let start_pos = lex^.pos - 1
         while is_alphanumeric(peek(lex)) {
             advance(lex)
         }
-        let len = lex^.pos - start_pos
         let ident = lex^.source[start_pos..lex^.pos]
         
-        // Check keywords
+        if ident == "data" { return make_token(TokenKind.Data, start_line, start_col) }
+        if ident == "fn" { return make_token(TokenKind.Fn, start_line, start_col) }
         if ident == "let" { return make_token(TokenKind.Let, start_line, start_col) }
         if ident == "mut" { return make_token(TokenKind.Mut, start_line, start_col) }
-        if ident == "fn" { return make_token(TokenKind.Fn, start_line, start_col) }
         if ident == "if" { return make_token(TokenKind.If, start_line, start_col) }
         if ident == "else" { return make_token(TokenKind.Else, start_line, start_col) }
         if ident == "while" { return make_token(TokenKind.While, start_line, start_col) }
         if ident == "return" { return make_token(TokenKind.Return, start_line, start_col) }
+        if ident == "when" { return make_token(TokenKind.When, start_line, start_col) }
+        if ident == "break" { return make_token(TokenKind.Break, start_line, start_col) }
+        if ident == "continue" { return make_token(TokenKind.Continue, start_line, start_col) }
+        if ident == "use" { return make_token(TokenKind.Use, start_line, start_col) }
+        if ident == "extern" { return make_token(TokenKind.Extern, start_line, start_col) }
+        if ident == "true" { return make_token(TokenKind.True, start_line, start_col) }
+        if ident == "false" { return make_token(TokenKind.False, start_line, start_col) }
+        if ident == "choice" { return make_token(TokenKind.Choice, start_line, start_col) }
+        if ident == "alloc" { return make_token(TokenKind.Alloc, start_line, start_col) }
+        if ident == "free" { return make_token(TokenKind.Free, start_line, start_col) }
+        if ident == "None" { return make_token(TokenKind.NoneLiteral, start_line, start_col) }
+        if ident == "and" { return make_token(TokenKind.And, start_line, start_col) }
+        if ident == "or" { return make_token(TokenKind.Or, start_line, start_col) }
+        if ident == "not" { return make_token(TokenKind.Not, start_line, start_col) }
+        if ident == "bitand" { return make_token(TokenKind.BitAnd, start_line, start_col) }
+        if ident == "bitor" { return make_token(TokenKind.BitOr, start_line, start_col) }
+        if ident == "bitxor" { return make_token(TokenKind.BitXor, start_line, start_col) }
+        if ident == "shl" { return make_token(TokenKind.Shl, start_line, start_col) }
+        if ident == "shr" { return make_token(TokenKind.Shr, start_line, start_col) }
+        if ident == "as" { return make_token(TokenKind.As, start_line, start_col) }
         
         return make_token(TokenKind.Identifier(ident), start_line, start_col)
     }
     
     if is_digit(c) {
-        // Collect integer
-        let start_pos = lex^.pos - 1
-        mut val = (c as Int) - ('0' as Int)
+        mut val_int = (c as Int) - ('0' as Int)
+        mut is_float = false
+        mut val_float = 0.0
+        mut fractional_mult = 0.1
         
-        while is_digit(peek(lex)) {
-            let next_c = advance(lex)
-            val = val * 10 + ((next_c as Int) - ('0' as Int))
+        while not is_at_end(lex) {
+            let next_c = peek(lex)
+            mut matched = false
+            
+            if is_digit(next_c) {
+                advance(lex)
+                if is_float {
+                    let digit_val = (next_c as Int) - ('0' as Int)
+                    val_float = val_float + (digit_val as Float) * fractional_mult
+                    fractional_mult = fractional_mult * 0.1
+                }
+                if not is_float {
+                    let digit_val = (next_c as Int) - ('0' as Int)
+                    val_int = val_int * 10 + digit_val
+                }
+                matched = true
+            }
+            
+            if not matched {
+                if next_c == '.' {
+                    if is_float {
+                        break
+                    }
+                    if peek_next(lex) == '.' {
+                        break // It's '..', not a decimal point
+                    }
+                    advance(lex)
+                    is_float = true
+                    val_float = val_int as Float
+                    matched = true
+                }
+            }
+            
+            if not matched {
+                break
+            }
         }
         
-        return make_token(TokenKind.Integer(val), start_line, start_col)
+        if is_float {
+            return make_token(TokenKind.Float(val_float), start_line, start_col)
+        }
+        return make_token(TokenKind.Integer(val_int), start_line, start_col)
     }
     
     return make_token(TokenKind.Error("Unexpected character"), start_line, start_col)

@@ -1,0 +1,531 @@
+use compiler.frontend.ast
+use compiler.frontend.diagnostics
+use compiler.frontend.sema.types
+use compiler.frontend.sema.env
+use std.collections
+
+data SemanticAnalyzer {
+    env: ^Environment
+    diagnostics: ^List(DiagnosticError)
+    in_loop: Int
+}
+
+fn analyzer_new() -> ^SemanticAnalyzer {
+    mut analyzer = alloc SemanticAnalyzer()
+    analyzer^.env = env_new()
+    mut dummy_err = alloc DiagnosticError()
+    analyzer^.diagnostics = new_list(DiagnosticError)(16, dummy_err)
+    analyzer^.in_loop = 0
+    return analyzer
+}
+
+fn report_error(analyzer: ^SemanticAnalyzer, span: ^Span, msg: String) {
+    let err = alloc_diagnostic_error(span, msg)
+    list_push(analyzer^.diagnostics, err^)
+}
+
+fn _dummy_instantiate_spanned_decl(d: Spanned(Declaration)) {}
+fn _dummy_instantiate_spanned_expr(e: Spanned(Expression)) {}
+fn _dummy_instantiate_spanned_stmt(s: Spanned(Statement)) {}
+fn _dummy_instantiate_type_info(t: TypeInfo) {}
+
+fn _dummy_type_check_var_sym(var_sym: ^VariableSymbol) {
+    let ty_ptr: ^TypeInfo = var_sym^.ty
+}
+
+fn analyze_program(mut analyzer: ^SemanticAnalyzer, program: ^Program) {
+    mut decl_list = program^.declarations
+    mut i = 0
+    while i < decl_list^.length {
+        let span_decl = list_get(decl_list, i)
+        let decl = span_decl.node
+        analyzer_register_declaration(analyzer, decl)
+        i = i + 1
+    }
+    
+    i = 0
+    while i < decl_list^.length {
+        let span_decl = list_get(decl_list, i)
+        let decl = span_decl.node
+        analyzer_analyze_declaration(analyzer, decl)
+        i = i + 1
+    }
+}
+
+fn analyzer_register_declaration(mut analyzer: ^SemanticAnalyzer, decl: Declaration) {
+    when decl {
+        Data(data_decl) -> {
+            mut sym = alloc DataSymbol()
+            sym^.dummy = 0
+            
+            mut s = alloc Symbol()
+            s^ = Symbol.Data(sym)
+            env_define(analyzer^.env, data_decl^.name, s)
+        }
+        Choice(choice_decl) -> {
+            mut sym = alloc ChoiceSymbol()
+            sym^.dummy = 0
+            
+            mut s = alloc Symbol()
+            s^ = Symbol.Choice(sym)
+            env_define(analyzer^.env, choice_decl^.name, s)
+        }
+        Fn(fn_decl) -> {
+            mut sym = alloc FunctionSymbol()
+            mut ret_ty_opt: ?^Spanned(Type) = fn_decl^.return_type
+            if ret_ty_opt != None {
+                let ret_span: ^Spanned(Type) = ret_ty_opt
+                mut t = alloc Type()
+                t^ = ret_span^.node
+                sym^.return_ty = type_info_from_ast(t)
+            } else {
+                mut void_ty = alloc TypeInfo()
+                void_ty^ = TypeInfo.Void
+                sym^.return_ty = void_ty
+            }
+            
+            mut s = alloc Symbol()
+            s^ = Symbol.Function(sym)
+            env_define(analyzer^.env, fn_decl^.name, s)
+        }
+        Extern(extern_decl) -> {
+            mut sym = alloc FunctionSymbol()
+            mut ret_ty_opt: ?^Spanned(Type) = extern_decl^.return_type
+            if ret_ty_opt != None {
+                let ret_span: ^Spanned(Type) = ret_ty_opt
+                mut t = alloc Type()
+                t^ = ret_span^.node
+                sym^.return_ty = type_info_from_ast(t)
+            } else {
+                mut void_ty = alloc TypeInfo()
+                void_ty^ = TypeInfo.Void
+                sym^.return_ty = void_ty
+            }
+            
+            mut s = alloc Symbol()
+            s^ = Symbol.Function(sym)
+            env_define(analyzer^.env, extern_decl^.name, s)
+        }
+        Var(var_decl) -> {
+            // Global vars aren't supported yet
+        }
+    }
+}
+
+fn analyzer_analyze_declaration(mut analyzer: ^SemanticAnalyzer, decl: Declaration) {
+    when decl {
+        Data(data_decl) -> {}
+        Choice(choice_decl) -> {}
+        Extern(extern_decl) -> {}
+        Fn(fn_decl) -> {
+            env_enter_scope(analyzer^.env)
+            
+            mut i = 0
+            while i < fn_decl^.params^.length {
+                let param = list_get(fn_decl^.params, i)
+                mut t = alloc Type()
+                t^ = param.ty^.node
+                let ty_info = type_info_from_ast(t)
+                
+                mut sym = alloc VariableSymbol()
+                sym^.is_mut = param.is_mut
+                sym^.ty = ty_info
+                sym^.size = t^.array_size
+                
+                mut s = alloc Symbol()
+                s^ = Symbol.Variable(sym)
+                env_define(analyzer^.env, param.name, s)
+                
+                i = i + 1
+            }
+            
+            // Expected return type would be saved here for type checking
+            analyzer_analyze_block(analyzer, fn_decl^.body)
+            
+            env_exit_scope(analyzer^.env)
+        }
+        Var(var_decl) -> {
+            // Global vars not fully supported yet, but we'd analyze expression
+            let inferred = analyzer_analyze_expression(analyzer, var_decl^.initializer)
+        }
+    }
+}
+
+fn analyzer_analyze_block(mut analyzer: ^SemanticAnalyzer, block: ^Spanned(Block)) {
+    mut b = block^.node
+    mut i = 0
+    while i < b.statements^.length {
+        let stmt = list_get(b.statements, i)
+        mut stmt_ptr = alloc Spanned(Statement)()
+        stmt_ptr^ = stmt
+        analyzer_analyze_statement(analyzer, stmt_ptr)
+        i = i + 1
+    }
+}
+
+fn analyzer_analyze_statement(mut analyzer: ^SemanticAnalyzer, stmt: ^Spanned(Statement)) {
+    when stmt^.node {
+        Var(var_decl) -> {
+            let inferred = analyzer_analyze_expression(analyzer, var_decl^.initializer)
+            
+            mut ty_info = inferred
+            mut ty_opt: ?^Spanned(Type) = var_decl^.ty
+            if ty_opt != None {
+                let ty_span: ^Spanned(Type) = ty_opt
+                mut t = alloc Type()
+                t^ = ty_span^.node
+                ty_info = type_info_from_ast(t)
+            }
+            
+            mut sym = alloc VariableSymbol()
+            sym^.is_mut = var_decl^.is_mut
+            sym^.ty = ty_info
+            sym^.size = 0
+            
+            mut s = alloc Symbol()
+            s^ = Symbol.Variable(sym)
+            env_define(analyzer^.env, var_decl^.name, s)
+        }
+        Assignment(assign) -> {
+            let t1 = analyzer_analyze_expression(analyzer, assign^.target)
+            let t2 = analyzer_analyze_expression(analyzer, assign^.value)
+        }
+        If(if_stmt) -> {
+            let cond_ty = analyzer_analyze_expression(analyzer, if_stmt^.condition)
+            analyzer_analyze_block(analyzer, if_stmt^.then_block)
+            mut else_opt: ?^Spanned(ElseBranch) = if_stmt^.else_branch
+            if else_opt != None {
+                let else_br: ^Spanned(ElseBranch) = else_opt
+                when else_br^.node {
+                    If(elif) -> {
+                        mut span_if = alloc Spanned(Statement)()
+                        mut stmt = alloc Statement()
+                        stmt^ = Statement.If(elif)
+                        span_if^.node = stmt^
+                        span_if^.span = else_br^.span
+                        analyzer_analyze_statement(analyzer, span_if)
+                    }
+                    Block(b) -> {
+                        mut span_b = alloc Spanned(Block)()
+                        span_b^.node = b^
+                        span_b^.span = else_br^.span
+                        analyzer_analyze_block(analyzer, span_b)
+                    }
+                }
+            }
+        }
+        While(while_stmt) -> {
+            let cond_ty = analyzer_analyze_expression(analyzer, while_stmt^.condition)
+            analyzer^.in_loop = analyzer^.in_loop + 1
+            analyzer_analyze_block(analyzer, while_stmt^.block)
+            analyzer^.in_loop = analyzer^.in_loop - 1
+        }
+        Return(ret_stmt) -> {
+            mut val_opt: ?^Spanned(Expression) = ret_stmt^.value
+            if val_opt != None {
+                let val: ^Spanned(Expression) = val_opt
+                let ret_ty = analyzer_analyze_expression(analyzer, val)
+            }
+        }
+        Expr(expr) -> {
+            let expr_ty = analyzer_analyze_expression(analyzer, expr)
+        }
+        Free(expr) -> {
+            let expr_ty = analyzer_analyze_expression(analyzer, expr)
+        }
+        Break -> {}
+        Continue -> {}
+    }
+}
+
+fn analyzer_analyze_expression(mut analyzer: ^SemanticAnalyzer, expr: ^Spanned(Expression)) -> ^TypeInfo {
+    mut ret_ty = alloc TypeInfo()
+    ret_ty^ = TypeInfo.Unknown
+    
+    when expr^.node {
+        Primary(prim) -> {
+            when prim^ {
+                Identifier(name) -> {
+                    let sym_opt = env_resolve(analyzer^.env, name)
+                    if sym_opt != None {
+                        let sym: ^Symbol = sym_opt
+                        when sym^ {
+                            Variable(var_sym) -> { 
+                                let v: ^VariableSymbol = var_sym
+                                let t_ptr: ^TypeInfo = v^.ty
+                                ret_ty^ = t_ptr^
+                            }
+                            Function(fn_sym) -> { }
+                            Data(data_sym) -> { ret_ty^ = TypeInfo.Custom(name) }
+                            Choice(choice_sym) -> { ret_ty^ = TypeInfo.Custom(name) }
+                        }
+                    } else {
+                        // Unresolved identifier
+                        report_error(analyzer, expr^.span, "Undefined identifier")
+                    }
+                }
+                Integer(val) -> { ret_ty^ = TypeInfo.Int }
+                Float(val) -> { ret_ty^ = TypeInfo.Float }
+                StringLiteral(val) -> { ret_ty^ = TypeInfo.String }
+                CharLiteral(val) -> { ret_ty^ = TypeInfo.Int } // chars are Int
+                Boolean(val) -> { ret_ty^ = TypeInfo.Boolean }
+                NoneLiteral -> {
+                    mut void_inner = alloc TypeInfo()
+                    void_inner^ = TypeInfo.Void
+                    ret_ty^ = TypeInfo.Nullable(void_inner)
+                }
+                Grouped(inner) -> {
+                    let inner_ty = analyzer_analyze_expression(analyzer, inner)
+                    ret_ty^ = inner_ty^
+                }
+                ListLiteral(exprs) -> {
+                    mut i = 0
+                    mut inner_ty = alloc TypeInfo()
+                    inner_ty^ = TypeInfo.Unknown
+                    while i < exprs^.length {
+                        let el = list_get(exprs, i)
+                        mut el_ptr = alloc Spanned(Expression)()
+                        el_ptr^ = el
+                        let ty = analyzer_analyze_expression(analyzer, el_ptr)
+                        if i == 0 {
+                            inner_ty^ = ty^
+                        }
+                        i = i + 1
+                    }
+                    mut array_info = alloc TypeInfoArray()
+                    array_info^.inner = inner_ty
+                    mut len_opt: ?Int = None
+                    len_opt = exprs^.length
+                    array_info^.size = len_opt
+                    ret_ty^ = TypeInfo.Array(array_info)
+                }
+            }
+        }
+        Unary(unary) -> {
+            let u: ^UnaryExpr = unary
+            let operand_ty = analyzer_analyze_expression(analyzer, u^.operand)
+            let op = u^.op
+            when op {
+                Negate -> {
+                    ret_ty^ = operand_ty^
+                }
+                Not -> {
+                    ret_ty^ = TypeInfo.Boolean
+                }
+            }
+        }
+        Binary(bin) -> {
+            let b: ^BinaryExpr = bin
+            let left_ty = analyzer_analyze_expression(analyzer, b^.left)
+            let right_ty = analyzer_analyze_expression(analyzer, b^.right)
+            let op = b^.op
+            when op {
+                Add -> { ret_ty^ = left_ty^ }
+                Sub -> { ret_ty^ = left_ty^ }
+                Mul -> { ret_ty^ = left_ty^ }
+                Div -> { ret_ty^ = left_ty^ }
+                Mod -> { ret_ty^ = left_ty^ }
+                Eq -> { ret_ty^ = TypeInfo.Boolean }
+                NotEq -> { ret_ty^ = TypeInfo.Boolean }
+                Lt -> { ret_ty^ = TypeInfo.Boolean }
+                LtEq -> { ret_ty^ = TypeInfo.Boolean }
+                Gt -> { ret_ty^ = TypeInfo.Boolean }
+                GtEq -> { ret_ty^ = TypeInfo.Boolean }
+                And -> { ret_ty^ = TypeInfo.Boolean }
+                Or -> { ret_ty^ = TypeInfo.Boolean }
+                BitAnd -> { ret_ty^ = left_ty^ }
+                BitOr -> { ret_ty^ = left_ty^ }
+                BitXor -> { ret_ty^ = left_ty^ }
+                Shl -> { ret_ty^ = left_ty^ }
+                Shr -> { ret_ty^ = left_ty^ }
+                Pipe -> { ret_ty^ = right_ty^ }
+            }
+        }
+        Property(prop) -> {
+            let p: ^PropertyAccess = prop
+            let obj_ty = analyzer_analyze_expression(analyzer, p^.object)
+            if p^.property == "length" {
+                when obj_ty^ {
+                    Array(arr_ty) -> { ret_ty^ = TypeInfo.Int }
+                    String -> { ret_ty^ = TypeInfo.Int }
+                    Unknown -> {}
+                    Int -> {}
+                    Float -> {}
+                    Boolean -> {}
+                    Char -> {}
+                    Void -> {}
+                    Custom(c) -> {}
+                    Pointer(ptr) -> {}
+                    Nullable(n) -> {}
+                    NoneVariant -> {}
+                }
+            }
+        }
+        Call(call) -> {
+            let c: ^FunctionCall = call
+            let callee_ty = analyzer_analyze_expression(analyzer, c^.callee)
+            
+            mut i = 0
+            while i < c^.arguments^.length {
+                let arg = list_get(c^.arguments, i)
+                mut arg_ptr = alloc Spanned(Expression)()
+                arg_ptr^ = arg
+                let dummy_arg = analyzer_analyze_expression(analyzer, arg_ptr)
+                i = i + 1
+            }
+            
+            mut callee_name = ""
+            when c^.callee^.node {
+                Primary(pr) -> {
+                    let pr_ptr: ^PrimaryExpr = pr
+                    when pr_ptr^ {
+                        Identifier(name) -> { callee_name = name }
+                        Integer(i) -> {}
+                        Float(f) -> {}
+                        StringLiteral(s) -> {}
+                        CharLiteral(ch) -> {}
+                        Boolean(b) -> {}
+                        ListLiteral(l) -> {}
+                        NoneLiteral -> {}
+                        Grouped(g) -> {}
+                    }
+                }
+                Unary(u) -> {}
+                Binary(b) -> {}
+                Property(p) -> {}
+                Call(call_expr) -> {}
+                When(w) -> {}
+                Alloc(a) -> {}
+                Deref(d) -> {}
+                VectorSlice(v) -> {}
+                Index(i) -> {}
+                VariantConstruct(v) -> {}
+                StructFieldAccess(s) -> {}
+                StringIndex(s) -> {}
+                StringSlice(s) -> {}
+                StringEq(s) -> {}
+                StringNotEq(s) -> {}
+                Cast(cast_expr) -> {}
+            }
+            
+            if callee_name != "" {
+                let sym_opt = env_resolve(analyzer^.env, callee_name)
+                if sym_opt != None {
+                    let sym: ^Symbol = sym_opt
+                    when sym^ {
+                        Function(fn_sym) -> {
+                            let f: ^FunctionSymbol = fn_sym
+                            ret_ty^ = f^.return_ty^
+                        }
+                        Data(data_sym) -> { ret_ty^ = TypeInfo.Custom(callee_name) }
+                        Variable(v) -> {}
+                        Choice(ch) -> {}
+                    }
+                }
+            }
+        }
+        When(w) -> {
+            let wh: ^WhenExpr = w
+            let target_ty = analyzer_analyze_expression(analyzer, wh^.target)
+            mut i = 0
+            while i < wh^.cases^.length {
+                let case_item = list_get(wh^.cases, i)
+                mut block_ptr = alloc Spanned(Block)()
+                block_ptr^ = case_item.body^
+                analyzer_analyze_block(analyzer, block_ptr)
+                i = i + 1
+            }
+        }
+        Alloc(a) -> {
+            let al: ^AllocExpr = a
+            mut ty_ptr = alloc Type()
+            ty_ptr^ = al^.ty^.node
+            let alloc_ptr = type_info_from_ast(ty_ptr)
+            ret_ty^ = TypeInfo.Pointer(alloc_ptr)
+            
+            mut i = 0
+            while i < al^.arguments^.length {
+                let arg = list_get(al^.arguments, i)
+                mut arg_ptr = alloc Spanned(Expression)()
+                arg_ptr^ = arg
+                let dummy_arg = analyzer_analyze_expression(analyzer, arg_ptr)
+                i = i + 1
+            }
+        }
+        Deref(d) -> {
+            let de: ^Spanned(Expression) = d
+            let inner_ty = analyzer_analyze_expression(analyzer, de)
+            when inner_ty^ {
+                Pointer(inner_ptr) -> {
+                    let ptr: ^TypeInfo = inner_ptr
+                    ret_ty^ = ptr^
+                }
+                Nullable(inner_ptr) -> {
+                    let ptr: ^TypeInfo = inner_ptr
+                    ret_ty^ = ptr^
+                }
+                Unknown -> {}
+                Int -> {}
+                Float -> {}
+                Boolean -> {}
+                String -> {}
+                Char -> {}
+                Void -> {}
+                Custom(c) -> {}
+                Array(arr) -> {}
+                NoneVariant -> {}
+            }
+        }
+        VectorSlice(v) -> {
+            let v_expr: ^VectorSliceExpr = v
+            let target_ty = analyzer_analyze_expression(analyzer, v_expr^.target)
+            ret_ty^ = target_ty^
+        }
+        Index(idx) -> {
+            let idx_expr: ^IndexExpr = idx
+            let target_ty = analyzer_analyze_expression(analyzer, idx_expr^.target)
+            let index_ty = analyzer_analyze_expression(analyzer, idx_expr^.index)
+            when target_ty^ {
+                Array(arr_info) -> {
+                    let a_info: ^TypeInfoArray = arr_info
+                    let inner: ^TypeInfo = a_info^.inner
+                    ret_ty^ = inner^
+                }
+                Unknown -> {}
+                Int -> {}
+                Float -> {}
+                Boolean -> {}
+                String -> {}
+                Char -> {}
+                Void -> {}
+                Custom(c) -> {}
+                Pointer(p) -> {}
+                Nullable(n) -> {}
+                NoneVariant -> {}
+            }
+        }
+        VariantConstruct(v) -> {
+            let var_expr: ^VariantConstructExpr = v
+            ret_ty^ = TypeInfo.Custom(var_expr^.choice_name)
+        }
+        StructFieldAccess(s) -> {
+            let s_expr: ^StructFieldAccessExpr = s
+            // Fallback for generated node
+            ret_ty^ = TypeInfo.Unknown
+        }
+        StringIndex(s) -> { ret_ty^ = TypeInfo.Char }
+        StringSlice(s) -> { ret_ty^ = TypeInfo.String }
+        StringEq(s) -> { ret_ty^ = TypeInfo.Boolean }
+        StringNotEq(s) -> { ret_ty^ = TypeInfo.Boolean }
+        Cast(c) -> {
+            let cast_expr: ^CastExpr = c
+            let expr_ty = analyzer_analyze_expression(analyzer, cast_expr^.expr)
+            mut ty_ptr = alloc Type()
+            ty_ptr^ = cast_expr^.target_type^.node
+            let cast_ret = type_info_from_ast(ty_ptr)
+            ret_ty^ = cast_ret^
+        }
+    }
+    
+    return ret_ty
+}

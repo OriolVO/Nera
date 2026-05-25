@@ -1,0 +1,1141 @@
+// compiler/midend/ir_gen.nera
+use compiler.midend.ir
+use compiler.frontend.ast
+use std.collections
+
+data StringListMapEntry {
+    key: String
+    value: ^List(String)
+}
+data StringListMap {
+    entries: ^List(StringListMapEntry)
+}
+
+data StringIntMapEntry {
+    key: String
+    value: Int
+}
+data StringIntMap {
+    entries: ^List(StringIntMapEntry)
+}
+
+data StringStringMapEntry {
+    key: String
+    value: String
+}
+data StringStringMap {
+    entries: ^List(StringStringMapEntry)
+}
+
+data StringInnerMapEntry {
+    key: String
+    value: ^StringIntMap
+}
+data StringInnerMap {
+    entries: ^List(StringInnerMapEntry)
+}
+
+fn string_eq(s1: String, s2: String) -> Boolean { return s1 == s2 }
+
+fn string_list_map_put(map: ^StringListMap, key: String, value: ^List(String)) {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            mut updated = alloc StringListMapEntry()
+            updated^.key = key
+            updated^.value = value
+            list_set(map^.entries, i, updated^)
+            return
+        }
+        i = i + 1
+    }
+    mut new_entry = alloc StringListMapEntry()
+    new_entry^.key = key
+    new_entry^.value = value
+    list_push(map^.entries, new_entry^)
+}
+
+fn string_list_map_get(map: ^StringListMap, key: String) -> ?^List(String) {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            mut ret: ?^List(String) = None
+            ret = entry.value
+            return ret
+        }
+        i = i + 1
+    }
+    mut ret: ?^List(String) = None
+    return ret
+}
+
+fn string_inner_map_put(map: ^StringInnerMap, key: String, value: ^StringIntMap) {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            mut updated = alloc StringInnerMapEntry()
+            updated^.key = key
+            updated^.value = value
+            list_set(map^.entries, i, updated^)
+            return
+        }
+        i = i + 1
+    }
+    mut new_entry = alloc StringInnerMapEntry()
+    new_entry^.key = key
+    new_entry^.value = value
+    list_push(map^.entries, new_entry^)
+}
+
+fn string_inner_map_get(map: ^StringInnerMap, key: String) -> ?^StringIntMap {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            mut ret: ?^StringIntMap = None
+            ret = entry.value
+            return ret
+        }
+        i = i + 1
+    }
+    mut ret: ?^StringIntMap = None
+    return ret
+}
+
+fn string_int_map_put(map: ^StringIntMap, key: String, value: Int) {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            mut updated = alloc StringIntMapEntry()
+            updated^.key = key
+            updated^.value = value
+            list_set(map^.entries, i, updated^)
+            return
+        }
+        i = i + 1
+    }
+    mut new_entry = alloc StringIntMapEntry()
+    new_entry^.key = key
+    new_entry^.value = value
+    list_push(map^.entries, new_entry^)
+}
+
+fn string_int_map_get(map: ^StringIntMap, key: String) -> ?Int {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            mut ret: ?Int = None
+            ret = entry.value
+            return ret
+        }
+        i = i + 1
+    }
+    mut ret: ?Int = None
+    return ret
+}
+
+fn string_int_map_contains(map: ^StringIntMap, key: String) -> Boolean {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn string_str_map_contains(map: ^StringStringMap, key: String) -> Boolean {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+data IRGenerator {
+    functions: ^List(IRFunction)
+    active_function: ?^IRFunction
+    active_block: ?^BasicBlock
+    temp_count: Int
+    label_count: Int
+    global_instructions: ^List(IRInstruction)
+    data_structs: ^StringListMap
+    choice_tags: ^StringInnerMap
+    array_sizes: ^StringIntMap
+    array_params: ^StringStringMap
+}
+
+fn ir_gen_new() -> ^IRGenerator {
+    mut gen = alloc IRGenerator()
+    mut dummy_fn = alloc IRFunction()
+    gen^.functions = new_list(10, dummy_fn)
+    gen^.active_function = None
+    gen^.active_block = None
+    gen^.temp_count = 0
+    gen^.label_count = 0
+    mut dummy_instr = alloc IRInstruction()
+    gen^.global_instructions = new_list(10, dummy_instr)
+    
+    mut data_structs = alloc StringListMap()
+    mut dummy_slme = alloc StringListMapEntry()
+    data_structs^.entries = new_list(10, dummy_slme)
+    gen^.data_structs = data_structs
+    
+    mut choice_tags = alloc StringInnerMap()
+    mut dummy_sime = alloc StringInnerMapEntry()
+    choice_tags^.entries = new_list(10, dummy_sime)
+    gen^.choice_tags = choice_tags
+    
+    mut array_sizes = alloc StringIntMap()
+    mut dummy_sie = alloc StringIntMapEntry()
+    array_sizes^.entries = new_list(10, dummy_sie)
+    gen^.array_sizes = array_sizes
+    
+    mut array_params = alloc StringStringMap()
+    mut dummy_ssme = alloc StringStringMapEntry()
+    array_params^.entries = new_list(10, dummy_ssme)
+    gen^.array_params = array_params
+    
+    return gen
+}
+
+fn ir_new_temp(mut gen: ^IRGenerator) -> ^IROperand {
+    let t = gen^.temp_count
+    gen^.temp_count = gen^.temp_count + 1
+    mut op = alloc IROperand()
+    op^ = IROperand.TempReg(t)
+    return op
+}
+
+fn ir_new_label(mut gen: ^IRGenerator, prefix: String) -> String {
+    let l = gen^.label_count
+    gen^.label_count = gen^.label_count + 1
+    return concat_strings(prefix, int_to_string(l)) // TODO: Fix int_to_string usage
+}
+
+fn ir_emit(mut gen: ^IRGenerator, instr: IRInstruction) {
+    mut blk_opt = gen^.active_block
+    if blk_opt != None {
+        mut blk: ^BasicBlock = blk_opt
+        list_push(blk^.instrs, instr)
+    } else {
+        list_push(gen^.global_instructions, instr)
+    }
+}
+
+fn ir_finish_block(mut gen: ^IRGenerator, term: Terminator) {
+    mut blk_opt = gen^.active_block
+    if blk_opt != None {
+        mut blk: ^BasicBlock = blk_opt
+        
+        mut set_term = false
+        when blk^.terminator {
+            None -> { set_term = true }
+            Jump(target) -> {}
+            Branch(cond, t, f) -> {}
+            Return(val) -> {}
+        }
+        
+        if set_term {
+            blk^.terminator = term
+        }
+        
+        mut fn_opt = gen^.active_function
+        if fn_opt != None {
+            let func: ^IRFunction = fn_opt
+            list_push(func^.blocks, blk^)
+        }
+        
+        gen^.active_block = None
+    }
+}
+
+fn ir_start_block(mut gen: ^IRGenerator, name: String) {
+    mut blk_opt = gen^.active_block
+    if blk_opt != None {
+        mut blk: ^BasicBlock = blk_opt
+        mut has_term = true
+        when blk^.terminator {
+            None -> { has_term = false }
+            Jump(target) -> {}
+            Branch(cond, t, f) -> {}
+            Return(val) -> {}
+        }
+        
+        if not has_term {
+            ir_finish_block(gen, Terminator.Jump(name))
+        } else {
+            ir_finish_block(gen, Terminator.None)
+        }
+    }
+    
+    mut new_blk = alloc BasicBlock()
+    new_blk^.name = name
+    mut dummy_instr = alloc IRInstruction()
+    new_blk^.instrs = new_list(10, dummy_instr)
+    new_blk^.terminator = Terminator.None
+    
+    gen^.active_block = new_blk
+}
+
+fn ir_generate(mut gen: ^IRGenerator, program: ^Program) {
+    mut i = 0
+    while i < program^.declarations^.length {
+        let span_decl = list_get(program^.declarations, i)
+        let decl = span_decl.node
+        ir_generate_declaration(gen, decl)
+        i = i + 1
+    }
+}
+
+fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
+    when decl {
+        Fn(fn_decl) -> {
+            gen^.temp_count = 0
+            gen^.label_count = 0
+            
+            mut ret_ty_name = "Void"
+            mut ret_opt: ?^Spanned(Type) = fn_decl^.return_type
+            if ret_opt != None {
+                let r: ^Spanned(Type) = ret_opt
+                ret_ty_name = r^.node.name
+            }
+            
+            mut dummy_str = alloc String()
+            dummy_str^ = ""
+            mut params_list = new_list(10, dummy_str)
+            mut i = 0
+            while i < fn_decl^.params^.length {
+                let param = list_get(fn_decl^.params, i)
+                list_push(params_list, param.name)
+                i = i + 1
+            }
+            
+            mut func = alloc IRFunction()
+            func^.name = fn_decl^.name
+            func^.params = params_list
+            func^.return_type = ret_ty_name
+            mut dummy_blk = alloc BasicBlock()
+            func^.blocks = new_list(10, dummy_blk)
+            func^.is_extern = false
+            
+            gen^.active_function = func
+            
+            ir_start_block(gen, "entry")
+            ir_generate_block(gen, fn_decl^.body)
+            
+            mut blk_opt = gen^.active_block
+            if blk_opt != None {
+                mut blk: ^BasicBlock = blk_opt
+                mut has_term = true
+                when blk^.terminator {
+                    None -> { has_term = false }
+                    Jump(t) -> {}
+                    Branch(c, t, f) -> {}
+                    Return(v) -> {}
+                }
+                
+                if not has_term {
+                    mut ret_val: ?^IROperand = None
+                    ir_finish_block(gen, Terminator.Return(ret_val))
+                } else {
+                    ir_finish_block(gen, Terminator.None)
+                }
+            }
+            
+            mut cur_fn_opt = gen^.active_function
+            if cur_fn_opt != None {
+                let cur_fn: ^IRFunction = cur_fn_opt
+                list_push(gen^.functions, cur_fn^)
+            }
+            gen^.active_function = None
+        }
+        Extern(extern_decl) -> {
+            mut ret_ty_name = "Void"
+            mut ret_opt: ?^Spanned(Type) = extern_decl^.return_type
+            if ret_opt != None {
+                let r: ^Spanned(Type) = ret_opt
+                ret_ty_name = r^.node.name
+            }
+            
+            mut dummy_str = alloc String()
+            dummy_str^ = ""
+            mut params_list = new_list(10, dummy_str)
+            mut i = 0
+            while i < extern_decl^.params^.length {
+                let param = list_get(extern_decl^.params, i)
+                list_push(params_list, param.name)
+                i = i + 1
+            }
+            
+            mut func = alloc IRFunction()
+            func^.name = extern_decl^.name
+            func^.params = params_list
+            func^.return_type = ret_ty_name
+            mut dummy_blk = alloc BasicBlock()
+            func^.blocks = new_list(10, dummy_blk)
+            func^.is_extern = true
+            
+            list_push(gen^.functions, func^)
+        }
+        Var(var_decl) -> {
+            let val = ir_generate_expression(gen, var_decl^.initializer)
+            mut var_op = alloc IROperand()
+            var_op^ = IROperand.Variable(var_decl^.name)
+            ir_emit(gen, IRInstruction.Assign(var_op, val))
+        }
+        Data(data_decl) -> {
+            mut dummy_str = alloc String()
+            dummy_str^ = ""
+            mut fields_list = new_list(10, dummy_str)
+            
+            mut i = 0
+            while i < data_decl^.fields^.length {
+                let field = list_get(data_decl^.fields, i)
+                list_push(fields_list, field.name)
+                i = i + 1
+            }
+            
+            string_list_map_put(gen^.data_structs, data_decl^.name, fields_list)
+        }
+        Choice(choice_decl) -> {
+            mut tag_map = alloc StringIntMap()
+            mut dummy_entry = alloc StringIntMapEntry()
+            tag_map^.entries = new_list(10, dummy_entry)
+            
+            mut i = 0
+            while i < choice_decl^.variants^.length {
+                let variant = list_get(choice_decl^.variants, i)
+                string_int_map_put(tag_map, variant.name, i)
+                i = i + 1
+            }
+            
+            string_inner_map_put(gen^.choice_tags, choice_decl^.name, tag_map)
+        }
+    }
+}
+
+fn ir_generate_block(mut gen: ^IRGenerator, block: ^Spanned(Block)) {
+    mut i = 0
+    while i < block^.node.statements^.length {
+        let stmt = list_get(block^.node.statements, i)
+        mut stmt_ptr = alloc Spanned(Statement)()
+        stmt_ptr^ = stmt
+        ir_generate_statement(gen, stmt_ptr)
+        i = i + 1
+    }
+}
+
+fn _dummy_instantiate_ir_decl(d: Spanned(Declaration)) {}
+fn _dummy_instantiate_ir_stmt(s: Spanned(Statement)) {}
+fn _dummy_instantiate_ir_expr(e: Spanned(Expression)) {}
+
+fn ir_generate_statement(mut gen: ^IRGenerator, stmt: ^Spanned(Statement)) {
+    when stmt^.node {
+        Var(var_decl) -> {
+            mut ty_opt: ?^Spanned(Type) = var_decl^.ty
+            if ty_opt != None {
+                let ty: ^Spanned(Type) = ty_opt
+                if ty^.node.is_array {
+                    let sz: Int = ty^.node.array_size
+                    if sz > 0 {
+                        string_int_map_put(gen^.array_sizes, var_decl^.name, sz)
+                    }
+                }
+            }
+            let val = ir_generate_expression(gen, var_decl^.initializer)
+            mut var_op = alloc IROperand()
+            var_op^ = IROperand.Variable(var_decl^.name)
+            ir_emit(gen, IRInstruction.Assign(var_op, val))
+        }
+        Assignment(assign) -> {
+            mut handled_special = false
+            
+            let target_node: Expression = assign^.target^.node
+            when target_node {
+                VectorSlice(target_slice) -> {
+                    let target_slice_node: Expression = target_slice^.target^.node
+                    when target_slice_node {
+                        Property(prop_access) -> {
+                            let prop_access_obj_node: Expression = prop_access^.object^.node
+                            when prop_access_obj_node {
+                                Primary(prim) -> {
+                                    when prim^ {
+                                        Identifier(target_array) -> {
+                                            mut rhs_is_vector = false
+                                            mut rhs_arr = ""
+                                            mut rhs_prop_name = ""
+                                            
+                                            let assign_val_node: Expression = assign^.value^.node
+                                            when assign_val_node {
+                                                VectorSlice(rhs_slice) -> {
+                                                    let rhs_slice_target_node: Expression = rhs_slice^.target^.node
+                                                    when rhs_slice_target_node {
+                                                        Property(rhs_prop) -> {
+                                                            let rhs_prop_obj_node: Expression = rhs_prop^.object^.node
+                                                            when rhs_prop_obj_node {
+                                                                Primary(rhs_prim) -> {
+                                                                    when rhs_prim^ {
+                                                                        Identifier(name) -> {
+                                                                            if string_int_map_contains(gen^.array_sizes, name) or string_str_map_contains(gen^.array_params, name) {
+                                                                                rhs_is_vector = true
+                                                                                rhs_arr = name
+                                                                                rhs_prop_name = rhs_prop^.property
+                                                                            }
+                                                                        }
+                                                                        Integer(i) -> {} Float(f) -> {} Boolean(b) -> {} StringLiteral(s) -> {} CharLiteral(c) -> {} NoneLiteral -> {} ListLiteral(l) -> {} Grouped(g) -> {}
+                                                                    }
+                                                                }
+                                                                Call(c) -> {} When(w) -> {} VectorSlice(v) -> {} Index(i) -> {} VariantConstruct(v) -> {} Alloc(a) -> {} Cast(c) -> {} StringIndex(s) -> {} StringSlice(s) -> {} StringEq(s) -> {} StringNotEq(s) -> {} Binary(b) -> {} Unary(u) -> {} Property(p) -> {} Deref(d) -> {} StructFieldAccess(s) -> {}
+                                                            }
+                                                        }
+                                                        Call(c) -> {} When(w) -> {} VectorSlice(v) -> {} Index(i) -> {} VariantConstruct(v) -> {} Alloc(a) -> {} Cast(c) -> {} StringIndex(s) -> {} StringSlice(s) -> {} StringEq(s) -> {} StringNotEq(s) -> {} Binary(b) -> {} Unary(u) -> {} Primary(p) -> {} Deref(d) -> {} StructFieldAccess(s) -> {} Property(p) -> {}
+                                                    }
+                                                }
+                                                Call(c) -> {} When(w) -> {} Index(i) -> {} VariantConstruct(v) -> {} Alloc(a) -> {} Cast(c) -> {} StringIndex(s) -> {} StringSlice(s) -> {} StringEq(s) -> {} StringNotEq(s) -> {} Binary(b) -> {} Unary(u) -> {} Property(p) -> {} Primary(p) -> {} Deref(d) -> {} StructFieldAccess(s) -> {}
+                                            }
+                                            
+                                            mut right_val = alloc VectorOperand()
+                                            if rhs_is_vector {
+                                                right_val^ = VectorOperand.Vector(rhs_arr, rhs_prop_name)
+                                            } else {
+                                                let scalar_val = ir_generate_expression(gen, assign^.value)
+                                                right_val^ = VectorOperand.Scalar(scalar_val)
+                                            }
+                                            
+                                            mut size = 0
+                                            mut sz_opt = string_int_map_get(gen^.array_sizes, target_array)
+                                            if sz_opt != None {
+                                                let s: Int = sz_opt
+                                                size = s
+                                            }
+                                            
+                                            mut start_op = alloc IROperand()
+                                            start_op^ = IROperand.LiteralInt(0)
+                                            mut start_expr_opt: ?^Spanned(Expression) = target_slice^.start
+                                            if start_expr_opt != None {
+                                                let s_expr: ^Spanned(Expression) = start_expr_opt
+                                                start_op = ir_generate_expression(gen, s_expr)
+                                            }
+                                            
+                                            mut end_op = alloc IROperand()
+                                            end_op^ = IROperand.LiteralInt(size)
+                                            mut end_expr_opt: ?^Spanned(Expression) = target_slice^.end
+                                            if end_expr_opt != None {
+                                                let e_expr: ^Spanned(Expression) = end_expr_opt
+                                                end_op = ir_generate_expression(gen, e_expr)
+                                            }
+                                            
+                                            mut apply_op = alloc FlatVectorApplyOp()
+                                            apply_op^.prop = prop_access^.property
+                                            apply_op^.op = assign^.op
+                                            apply_op^.operand = right_val^
+                                            
+                                            mut dummy_op = alloc FlatVectorApplyOp()
+                                            mut ops_list = new_list(1, dummy_op)
+                                            list_push(ops_list, apply_op^)
+                                            
+                                            ir_emit(gen, IRInstruction.FlatVectorApply(target_array, ops_list, start_op, end_op, size))
+                                            handled_special = true
+                                        }
+                                        Integer(i) -> {} Float(f) -> {} Boolean(b) -> {} StringLiteral(s) -> {} CharLiteral(c) -> {} NoneLiteral -> {} ListLiteral(l) -> {} Grouped(g) -> {}
+                                    }
+                                }
+                                Call(c) -> {} When(w) -> {} VectorSlice(v) -> {} Index(i) -> {} VariantConstruct(v) -> {} Alloc(a) -> {} Cast(c) -> {} StringIndex(s) -> {} StringSlice(s) -> {} StringEq(s) -> {} StringNotEq(s) -> {} Binary(b) -> {} Unary(u) -> {} Property(p) -> {} Deref(d) -> {} StructFieldAccess(s) -> {}
+                            }
+                        }
+                        Call(c) -> {} When(w) -> {} VectorSlice(v) -> {} Index(i) -> {} VariantConstruct(v) -> {} Alloc(a) -> {} Cast(c) -> {} StringIndex(s) -> {} StringSlice(s) -> {} StringEq(s) -> {} StringNotEq(s) -> {} Binary(b) -> {} Unary(u) -> {} Primary(p) -> {} Deref(d) -> {} StructFieldAccess(s) -> {} Property(p) -> {}
+                    }
+                }
+                Index(index_expr) -> {
+                    let index_expr_node: Expression = index_expr^.target^.node
+                    when index_expr_node {
+                        Property(prop_access) -> {
+                            let prop_access_obj_node: Expression = prop_access^.object^.node
+                            when prop_access_obj_node {
+                                Primary(prim) -> {
+                                    when prim^ {
+                                        Identifier(target_array) -> {
+                                            let val = ir_generate_expression(gen, assign^.value)
+                                            let idx = ir_generate_expression(gen, index_expr^.index)
+                                            
+                                            mut size = 0
+                                            mut sz_opt = string_int_map_get(gen^.array_sizes, target_array)
+                                            if sz_opt != None {
+                                                let s: Int = sz_opt
+                                                size = s
+                                            }
+                                            
+                                            ir_emit(gen, IRInstruction.StoreArrayElement(target_array, prop_access^.property, idx, val, size))
+                                            handled_special = true
+                                        }
+                                        Integer(i) -> {} Float(f) -> {} Boolean(b) -> {} StringLiteral(s) -> {} CharLiteral(c) -> {} NoneLiteral -> {} ListLiteral(l) -> {} Grouped(g) -> {}
+                                    }
+                                }
+                                Call(c) -> {} When(w) -> {} VectorSlice(v) -> {} Index(i) -> {} VariantConstruct(v) -> {} Alloc(a) -> {} Cast(c) -> {} StringIndex(s) -> {} StringSlice(s) -> {} StringEq(s) -> {} StringNotEq(s) -> {} Binary(b) -> {} Unary(u) -> {} Property(p) -> {} Deref(d) -> {} StructFieldAccess(s) -> {}
+                            }
+                        }
+                        Call(c) -> {} When(w) -> {} VectorSlice(v) -> {} Index(i) -> {} VariantConstruct(v) -> {} Alloc(a) -> {} Cast(c) -> {} StringIndex(s) -> {} StringSlice(s) -> {} StringEq(s) -> {} StringNotEq(s) -> {} Binary(b) -> {} Unary(u) -> {} Primary(p) -> {} Deref(d) -> {} StructFieldAccess(s) -> {} Property(p) -> {}
+                    }
+                }
+                Call(c) -> {} When(w) -> {} VariantConstruct(v) -> {} Alloc(a) -> {} Cast(c) -> {} StringIndex(s) -> {} StringSlice(s) -> {} StringEq(s) -> {} StringNotEq(s) -> {} Binary(b) -> {} Unary(u) -> {} Property(p) -> {} Primary(p) -> {} Deref(d) -> {} StructFieldAccess(s) -> {}
+            }
+            
+            if not handled_special {
+                let right_val = ir_generate_expression(gen, assign^.value)
+                
+                mut final_val = right_val
+                mut op_name = assign^.op
+                when op_name {
+                    Assign -> {}
+                    AddAssign -> {
+                        let left_val = ir_generate_expression(gen, assign^.target)
+                        let tmp = ir_new_temp(gen)
+                        ir_emit(gen, IRInstruction.BinaryOp(tmp, BinaryOp.Add, left_val, right_val))
+                        final_val = tmp
+                    }
+                    SubAssign -> {
+                        let left_val = ir_generate_expression(gen, assign^.target)
+                        let tmp = ir_new_temp(gen)
+                        ir_emit(gen, IRInstruction.BinaryOp(tmp, BinaryOp.Sub, left_val, right_val))
+                        final_val = tmp
+                    }
+                    MulAssign -> {
+                        let left_val = ir_generate_expression(gen, assign^.target)
+                        let tmp = ir_new_temp(gen)
+                        ir_emit(gen, IRInstruction.BinaryOp(tmp, BinaryOp.Mul, left_val, right_val))
+                        final_val = tmp
+                    }
+                    DivAssign -> {
+                        let left_val = ir_generate_expression(gen, assign^.target)
+                        let tmp = ir_new_temp(gen)
+                        ir_emit(gen, IRInstruction.BinaryOp(tmp, BinaryOp.Div, left_val, right_val))
+                        final_val = tmp
+                    }
+                }
+                
+                let fall_assign_target_node: Expression = assign^.target^.node
+                when fall_assign_target_node {
+                    StructFieldAccess(access) -> {
+                        let ptr_op = ir_generate_expression(gen, access^.object)
+                        ir_emit(gen, IRInstruction.StoreStructField(ptr_op, access^.field_index, final_val))
+                    }
+                    Property(prop_access) -> {
+                        let obj_val = ir_generate_expression(gen, prop_access^.object)
+                        ir_emit(gen, IRInstruction.StoreProperty(obj_val, prop_access^.property, final_val))
+                    }
+                    Deref(inner_expr) -> {
+                        let ptr_val = ir_generate_expression(gen, inner_expr)
+                        ir_emit(gen, IRInstruction.StorePointer(ptr_val, final_val))
+                    }
+                    Primary(prim) -> {
+                        when prim^ {
+                            Identifier(name) -> {
+                                mut var_op = alloc IROperand()
+                                var_op^ = IROperand.Variable(name)
+                                ir_emit(gen, IRInstruction.Assign(var_op, final_val))
+                            }
+                            Integer(i) -> {} Float(f) -> {} Boolean(b) -> {} StringLiteral(s) -> {} CharLiteral(c) -> {} NoneLiteral -> {} ListLiteral(l) -> {} Grouped(g) -> {}
+                        }
+                    }
+                    Call(c) -> {} When(w) -> {} VariantConstruct(v) -> {} Alloc(a) -> {} Cast(c) -> {} StringIndex(s) -> {} StringSlice(s) -> {} StringEq(s) -> {} StringNotEq(s) -> {} Binary(b) -> {} Unary(u) -> {} VectorSlice(v) -> {} Index(i) -> {}
+                }
+            }
+        }
+        If(if_stmt) -> {
+            let cond = ir_generate_expression(gen, if_stmt^.condition)
+            let then_label = ir_new_label(gen, "if_then")
+            let end_label = ir_new_label(gen, "if_end")
+            
+            mut else_label = end_label
+            mut else_opt: ?^Spanned(ElseBranch) = if_stmt^.else_branch
+            if else_opt != None {
+                else_label = ir_new_label(gen, "if_else")
+            }
+            
+            ir_finish_block(gen, Terminator.Branch(cond, then_label, else_label))
+            
+            ir_start_block(gen, then_label)
+            ir_generate_block(gen, if_stmt^.then_block)
+            ir_finish_block(gen, Terminator.Jump(end_label))
+            
+            if else_opt != None {
+                ir_start_block(gen, else_label)
+                let else_br: ^Spanned(ElseBranch) = else_opt
+                when else_br^.node {
+                    If(elif) -> {
+                        mut span_if = alloc Spanned(Statement)()
+                        mut stmt = alloc Statement()
+                        stmt^ = Statement.If(elif)
+                        span_if^.node = stmt^
+                        span_if^.span = else_br^.span
+                        ir_generate_statement(gen, span_if)
+                    }
+                    Block(b) -> {
+                        mut span_b = alloc Spanned(Block)()
+                        span_b^.node = b^
+                        span_b^.span = else_br^.span
+                        ir_generate_block(gen, span_b)
+                    }
+                }
+                ir_finish_block(gen, Terminator.Jump(end_label))
+            }
+            
+            ir_start_block(gen, end_label)
+        }
+        While(while_stmt) -> {
+            let cond_label = ir_new_label(gen, "while_cond")
+            let body_label = ir_new_label(gen, "while_body")
+            let end_label = ir_new_label(gen, "while_end")
+            
+            ir_finish_block(gen, Terminator.Jump(cond_label))
+            
+            ir_start_block(gen, cond_label)
+            let cond = ir_generate_expression(gen, while_stmt^.condition)
+            ir_finish_block(gen, Terminator.Branch(cond, body_label, end_label))
+            
+            ir_start_block(gen, body_label)
+            ir_generate_block(gen, while_stmt^.block)
+            ir_finish_block(gen, Terminator.Jump(cond_label))
+            
+            ir_start_block(gen, end_label)
+        }
+        Return(ret_stmt) -> {
+            mut val_opt: ?^IROperand = None
+            mut expr_opt: ?^Spanned(Expression) = ret_stmt^.value
+            if expr_opt != None {
+                let e: ^Spanned(Expression) = expr_opt
+                val_opt = ir_generate_expression(gen, e)
+            }
+            ir_finish_block(gen, Terminator.Return(val_opt))
+        }
+        Expr(expr) -> {
+            let dummy = ir_generate_expression(gen, expr)
+        }
+        Free(expr) -> {
+            let target = ir_generate_expression(gen, expr)
+            ir_emit(gen, IRInstruction.Free(target))
+        }
+        Break -> {
+            // Placeholder - Loop labels not implemented in bootstrap phase 2 map
+        }
+        Continue -> {
+            // Placeholder - Loop labels not implemented in bootstrap phase 2 map
+        }
+    }
+}
+
+fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> ^IROperand {
+    mut ret_op = alloc IROperand()
+    ret_op^ = IROperand.Void
+    
+    when expr^.node {
+        Primary(prim) -> {
+            when prim^ {
+                Identifier(name) -> { ret_op^ = IROperand.Variable(name) }
+                Integer(val) -> { ret_op^ = IROperand.LiteralInt(val) }
+                Float(val) -> { ret_op^ = IROperand.LiteralFloat(val) }
+                StringLiteral(val) -> { ret_op^ = IROperand.LiteralString(val) }
+                CharLiteral(val) -> { ret_op^ = IROperand.LiteralChar(val) }
+                Boolean(val) -> { ret_op^ = IROperand.LiteralBool(val) }
+                NoneLiteral -> { ret_op^ = IROperand.NoneLiteral }
+                Grouped(inner) -> { return ir_generate_expression(gen, inner) }
+                ListLiteral(exprs) -> {
+                    // complex setup not fully implemented in bootstrap step 1
+                }
+            }
+        }
+        Unary(unary) -> {
+            let u: ^UnaryExpr = unary
+            let operand = ir_generate_expression(gen, u^.operand)
+            let tmp = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.UnaryOp(tmp, u^.op, operand))
+            return tmp
+        }
+        Binary(bin) -> {
+            let b: ^BinaryExpr = bin
+            let left = ir_generate_expression(gen, b^.left)
+            let right = ir_generate_expression(gen, b^.right)
+            let tmp = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.BinaryOp(tmp, b^.op, left, right))
+            return tmp
+        }
+        Property(prop) -> {
+            let p: ^PropertyAccess = prop
+            let obj = ir_generate_expression(gen, p^.object)
+            let tmp = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.LoadProperty(tmp, obj, p^.property))
+            return tmp
+        }
+        Call(call) -> {
+            let c: ^FunctionCall = call
+            let callee = ir_generate_expression(gen, c^.callee)
+            
+            mut args_list = new_list(10, callee) // dummy default
+            mut i = 0
+            while i < c^.arguments^.length {
+                let arg = list_get(c^.arguments, i)
+                mut arg_ptr = alloc Spanned(Expression)()
+                arg_ptr^ = arg
+                let arg_op = ir_generate_expression(gen, arg_ptr)
+                list_push(args_list, arg_op^)
+                i = i + 1
+            }
+            
+            let tmp = ir_new_temp(gen)
+            mut dest_opt: ?^IROperand = None
+            dest_opt = tmp
+            ir_emit(gen, IRInstruction.Call(dest_opt, callee, args_list))
+            return tmp
+        }
+        When(w) -> {
+            let when_expr: ^WhenExpr = w
+            let target_op = ir_generate_expression(gen, when_expr^.target)
+            let dest_temp = ir_new_temp(gen)
+            let end_label = ir_new_label(gen, "when_end")
+            
+            if when_expr^.is_nullable {
+                let cmp_res = ir_new_temp(gen)
+                mut none_op = alloc IROperand()
+                none_op^ = IROperand.NoneLiteral
+                ir_emit(gen, IRInstruction.BinaryOp(cmp_res, BinaryOp.Eq, target_op, none_op))
+                
+                let none_label = ir_new_label(gen, "when_none")
+                let val_label = ir_new_label(gen, "when_val")
+                ir_finish_block(gen, Terminator.Branch(cmp_res, none_label, val_label))
+                
+                // None case
+                ir_start_block(gen, none_label)
+                mut none_handled = false
+                mut i = 0
+                while i < when_expr^.cases^.length {
+                    let case_node = list_get(when_expr^.cases, i)
+                    if string_eq(case_node.variant_name, "None") {
+                        // generate body
+                        mut j = 0
+                        while j < case_node.body^.node.statements^.length {
+                            let stmt = list_get(case_node.body^.node.statements, j)
+                            mut stmt_ptr = alloc Spanned(Statement)()
+                            stmt_ptr^ = stmt
+                            if j == case_node.body^.node.statements^.length - 1 {
+                                when stmt_ptr^.node {
+                                    Expr(e) -> {
+                                        let val = ir_generate_expression(gen, e)
+                                        ir_emit(gen, IRInstruction.Assign(dest_temp, val))
+                                    }
+                                    Var(v) -> { ir_generate_statement(gen, stmt_ptr) }
+                                    Assignment(a) -> { ir_generate_statement(gen, stmt_ptr) }
+                                    If(i) -> { ir_generate_statement(gen, stmt_ptr) }
+                                    While(w) -> { ir_generate_statement(gen, stmt_ptr) }
+                                    Return(r) -> { ir_generate_statement(gen, stmt_ptr) }
+                                    Free(f) -> { ir_generate_statement(gen, stmt_ptr) }
+                                    Break -> { ir_generate_statement(gen, stmt_ptr) }
+                                    Continue -> { ir_generate_statement(gen, stmt_ptr) }
+                                }
+                            } else {
+                                ir_generate_statement(gen, stmt_ptr)
+                            }
+                            j = j + 1
+                        }
+                        none_handled = true
+                        i = when_expr^.cases^.length // break
+                    } else {
+                        i = i + 1
+                    }
+                }
+                ir_finish_block(gen, Terminator.Jump(end_label))
+                
+                // Val case
+                ir_start_block(gen, val_label)
+                i = 0
+                while i < when_expr^.cases^.length {
+                    let case_node = list_get(when_expr^.cases, i)
+                    if not string_eq(case_node.variant_name, "None") {
+                        mut bind_op = alloc IROperand()
+                        bind_op^ = IROperand.Variable(case_node.variant_name) // bindings[0] conceptually
+                        ir_emit(gen, IRInstruction.Assign(bind_op, target_op))
+                        
+                        mut j = 0
+                        while j < case_node.body^.node.statements^.length {
+                            let stmt = list_get(case_node.body^.node.statements, j)
+                            mut stmt_ptr = alloc Spanned(Statement)()
+                            stmt_ptr^ = stmt
+                            if j == case_node.body^.node.statements^.length - 1 {
+                                when stmt_ptr^.node {
+                                    Expr(e) -> {
+                                        let val = ir_generate_expression(gen, e)
+                                        ir_emit(gen, IRInstruction.Assign(dest_temp, val))
+                                    }
+                                    Var(v) -> { ir_generate_statement(gen, stmt_ptr) }
+                                    Assignment(a) -> { ir_generate_statement(gen, stmt_ptr) }
+                                    If(i) -> { ir_generate_statement(gen, stmt_ptr) }
+                                    While(w) -> { ir_generate_statement(gen, stmt_ptr) }
+                                    Return(r) -> { ir_generate_statement(gen, stmt_ptr) }
+                                    Free(f) -> { ir_generate_statement(gen, stmt_ptr) }
+                                    Break -> { ir_generate_statement(gen, stmt_ptr) }
+                                    Continue -> { ir_generate_statement(gen, stmt_ptr) }
+                                }
+                            } else {
+                                ir_generate_statement(gen, stmt_ptr)
+                            }
+                            j = j + 1
+                        }
+                        i = when_expr^.cases^.length // break
+                    } else {
+                        i = i + 1
+                    }
+                }
+                ir_finish_block(gen, Terminator.Jump(end_label))
+                ir_start_block(gen, end_label)
+                return dest_temp
+            }
+            
+            // Standard enum
+            let tag_temp = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.ExtractTag(tag_temp, target_op))
+            
+            mut i = 0
+            while i < when_expr^.cases^.length {
+                let case_node = list_get(when_expr^.cases, i)
+                let case_label = ir_new_label(gen, "when_case")
+                let next_label = ir_new_label(gen, "when_next")
+                
+                mut expected_tag = 0
+                mut found = false
+                mut map_i = 0
+                while map_i < gen^.choice_tags^.entries^.length {
+                    let entry = list_get(gen^.choice_tags^.entries, map_i)
+                    let inner_map: ^StringIntMap = entry.value
+                    
+                    mut inner_opt = string_int_map_get(inner_map, case_node.variant_name)
+                    if inner_opt != None {
+                        let tag_val: Int = inner_opt
+                        expected_tag = tag_val
+                        found = true
+                        map_i = gen^.choice_tags^.entries^.length
+                    } else {
+                        map_i = map_i + 1
+                    }
+                }
+                
+                let cmp_res = ir_new_temp(gen)
+                mut lit_op = alloc IROperand()
+                lit_op^ = IROperand.LiteralInt(expected_tag)
+                ir_emit(gen, IRInstruction.BinaryOp(cmp_res, BinaryOp.Eq, tag_temp, lit_op))
+                
+                ir_finish_block(gen, Terminator.Branch(cmp_res, case_label, next_label))
+                ir_start_block(gen, case_label)
+                
+                mut b_idx = 0
+                while b_idx < case_node.bindings^.length {
+                    let b_name = list_get(case_node.bindings, b_idx)
+                    mut b_op = alloc IROperand()
+                    b_op^ = IROperand.Variable(b_name)
+                    ir_emit(gen, IRInstruction.ExtractPayload(b_op, target_op, b_idx))
+                    b_idx = b_idx + 1
+                }
+                
+                mut j = 0
+                while j < case_node.body^.node.statements^.length {
+                    let stmt = list_get(case_node.body^.node.statements, j)
+                    mut stmt_ptr = alloc Spanned(Statement)()
+                    stmt_ptr^ = stmt
+                    if j == case_node.body^.node.statements^.length - 1 {
+                        when stmt_ptr^.node {
+                            Expr(e) -> {
+                                let val = ir_generate_expression(gen, e)
+                                ir_emit(gen, IRInstruction.Assign(dest_temp, val))
+                            }
+                            Var(v) -> { ir_generate_statement(gen, stmt_ptr) }
+                            Assignment(a) -> { ir_generate_statement(gen, stmt_ptr) }
+                            If(i) -> { ir_generate_statement(gen, stmt_ptr) }
+                            While(w) -> { ir_generate_statement(gen, stmt_ptr) }
+                            Return(r) -> { ir_generate_statement(gen, stmt_ptr) }
+                            Free(f) -> { ir_generate_statement(gen, stmt_ptr) }
+                            Break -> { ir_generate_statement(gen, stmt_ptr) }
+                            Continue -> { ir_generate_statement(gen, stmt_ptr) }
+                        }
+                    } else {
+                        ir_generate_statement(gen, stmt_ptr)
+                    }
+                    j = j + 1
+                }
+                
+                ir_finish_block(gen, Terminator.Jump(end_label))
+                ir_start_block(gen, next_label)
+                
+                i = i + 1
+            }
+            
+            mut void_op = alloc IROperand()
+            void_op^ = IROperand.Void
+            ir_emit(gen, IRInstruction.Assign(dest_temp, void_op))
+            ir_finish_block(gen, Terminator.Jump(end_label))
+            ir_start_block(gen, end_label)
+            return dest_temp
+        }
+        Alloc(a) -> {
+            let al: ^AllocExpr = a
+            let tmp = ir_new_temp(gen)
+            mut ty_name = al^.ty^.node.name
+            mut size_in_bytes = 8
+            
+            mut fields_opt = string_list_map_get(gen^.data_structs, ty_name)
+            if fields_opt != None {
+                let fields_list: ^List(String) = fields_opt
+                size_in_bytes = fields_list^.length * 8
+                if size_in_bytes == 0 {
+                    size_in_bytes = 8
+                }
+            }
+            
+            ir_emit(gen, IRInstruction.Alloc(tmp, ty_name, size_in_bytes))
+            return tmp
+        }
+        Deref(d) -> {
+            let ptr = ir_generate_expression(gen, d)
+            let tmp = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.LoadPointer(tmp, ptr))
+            return tmp
+        }
+        VectorSlice(v) -> {
+            let vec_expr: ^VectorSliceExpr = v
+            return ir_generate_expression(gen, vec_expr^.target)
+        }
+        Index(idx) -> {
+            let idx_expr: ^IndexExpr = idx
+            let dest = ir_new_temp(gen)
+            
+            let idx_target_node: Expression = idx_expr^.target^.node
+            when idx_target_node {
+                Property(prop_access) -> {
+                    let prop_obj_node: Expression = prop_access^.object^.node
+                    when prop_obj_node {
+                        Primary(prim) -> {
+                            when prim^ {
+                                Identifier(target_array) -> {
+                                    let i_val = ir_generate_expression(gen, idx_expr^.index)
+                                    mut size = 0
+                                    mut sz_opt = string_int_map_get(gen^.array_sizes, target_array)
+                                    if sz_opt != None {
+                                        let s: Int = sz_opt
+                                        size = s
+                                    }
+                                    ir_emit(gen, IRInstruction.LoadArrayElement(dest, target_array, prop_access^.property, i_val, size))
+                                }
+                                Integer(i) -> {} Float(f) -> {} Boolean(b) -> {} StringLiteral(s) -> {} CharLiteral(c) -> {} NoneLiteral -> {} ListLiteral(l) -> {} Grouped(g) -> {}
+                            }
+                        }
+                        Call(c) -> {} When(w) -> {} VariantConstruct(v) -> {} Alloc(a) -> {} Cast(c) -> {} StringIndex(s) -> {} StringSlice(s) -> {} StringEq(s) -> {} StringNotEq(s) -> {} Binary(b) -> {} Unary(u) -> {} Property(p) -> {} Deref(d) -> {} StructFieldAccess(s) -> {} VectorSlice(v) -> {} Index(i) -> {}
+                    }
+                }
+                Call(c) -> {} When(w) -> {} VariantConstruct(v) -> {} Alloc(a) -> {} Cast(c) -> {} StringIndex(s) -> {} StringSlice(s) -> {} StringEq(s) -> {} StringNotEq(s) -> {} Binary(b) -> {} Unary(u) -> {} Property(p) -> {} Primary(p) -> {} Deref(d) -> {} StructFieldAccess(s) -> {} VectorSlice(v) -> {} Index(i) -> {}
+            }
+            return dest
+        }
+        VariantConstruct(v) -> {
+            let var_expr: ^VariantConstructExpr = v
+            
+            mut expected_tag = 0
+            mut inner_opt = string_inner_map_get(gen^.choice_tags, var_expr^.choice_name)
+            if inner_opt != None {
+                let inner_map: ^StringIntMap = inner_opt
+                mut tag_opt = string_int_map_get(inner_map, var_expr^.variant_name)
+                if tag_opt != None {
+                    let tag_val: Int = tag_opt
+                    expected_tag = tag_val
+                }
+            }
+            
+            mut args_list = new_list(10, ret_op) // dummy default
+            mut i = 0
+            while i < var_expr^.arguments^.length {
+                let arg = list_get(var_expr^.arguments, i)
+                mut arg_ptr = alloc Spanned(Expression)()
+                arg_ptr^ = arg
+                let arg_op = ir_generate_expression(gen, arg_ptr)
+                list_push(args_list, arg_op^)
+                i = i + 1
+            }
+            
+            let tmp = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.ConstructADT(tmp, expected_tag, args_list))
+            return tmp
+        }
+        StructFieldAccess(s) -> {
+            let acc: ^StructFieldAccessExpr = s
+            let ptr_op = ir_generate_expression(gen, acc^.object)
+            let dest = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.LoadStructField(dest, ptr_op, acc^.field_index, acc^.field_type))
+            return dest
+        }
+        StringIndex(s) -> {
+            let s_idx: ^StringIndexExpr = s
+            let str_op = ir_generate_expression(gen, s_idx^.target)
+            let idx_op = ir_generate_expression(gen, s_idx^.index)
+            let dest = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.LoadStringChar(dest, str_op, idx_op))
+            return dest
+        }
+        StringSlice(s) -> {
+            let s_slice: ^StringSliceExpr = s
+            let str_op = ir_generate_expression(gen, s_slice^.target)
+            
+            mut start_op = alloc IROperand()
+            start_op^ = IROperand.LiteralInt(0)
+            mut start_opt: ?^Spanned(Expression) = s_slice^.start
+            if start_opt != None {
+                let st: ^Spanned(Expression) = start_opt
+                start_op = ir_generate_expression(gen, st)
+            }
+            
+            mut end_op = alloc IROperand()
+            end_op^ = IROperand.LiteralInt(-1)
+            mut end_opt: ?^Spanned(Expression) = s_slice^.end
+            if end_opt != None {
+                let e: ^Spanned(Expression) = end_opt
+                end_op = ir_generate_expression(gen, e)
+            }
+            
+            let dest = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.Substring(dest, str_op, start_op, end_op))
+            return dest
+        }
+        StringEq(s) -> {
+            let s_eq: ^StringEqExpr = s
+            let left_op = ir_generate_expression(gen, s_eq^.left)
+            let right_op = ir_generate_expression(gen, s_eq^.right)
+            let dest = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.StringCompare(dest, left_op, right_op, true))
+            return dest
+        }
+        StringNotEq(s) -> {
+            let s_eq: ^StringEqExpr = s
+            let left_op = ir_generate_expression(gen, s_eq^.left)
+            let right_op = ir_generate_expression(gen, s_eq^.right)
+            let dest = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.StringCompare(dest, left_op, right_op, false))
+            return dest
+        }
+        Cast(c) -> {
+            let cast_expr: ^CastExpr = c
+            let expr_op = ir_generate_expression(gen, cast_expr^.expr)
+            let tmp = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.Cast(tmp, cast_expr^.target_type^.node.name, expr_op))
+            return tmp
+        }
+    }
+    
+    return ret_op
+}

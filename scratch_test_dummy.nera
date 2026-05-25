@@ -1,0 +1,10 @@
+use std.collections
+use std.io
+
+data MyData { val: Int }
+
+fn main() -> Int {
+    mut list = new_list(10, None)
+    // list_push(list, alloc MyData())
+    return 0
+}

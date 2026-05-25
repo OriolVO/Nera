@@ -117,6 +117,30 @@ fn main() {
 
 ---
 
+### Control Flow
+
+Nera supports standard conditional and loop statements, using block scoping:
+
+```nera
+fn process_number(x: Int) {
+    if x < 10 {
+        puts("Less than 10")
+    } else if x < 20 {
+        puts("Between 10 and 20")
+    } else {
+        puts("20 or more")
+    }
+
+    mut i = 0
+    while i < 3 {
+        print_int(i)
+        i = i + 1
+    }
+}
+```
+
+---
+
 ### Data vs. Logic Separation
 
 ```nera

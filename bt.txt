@@ -1,0 +1,2 @@
+DEBUG: analyze_statement called for 'let el = list_get(exprs, i)'
+DEBUG: analyze_statement called for 'let el = list_get(exprs, i)'

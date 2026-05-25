@@ -1,0 +1,258 @@
+// compiler/frontend/ast.nera
+use std.collections
+use compiler.frontend.diagnostics
+
+data Program {
+    imports: ^List(Spanned(ImportDirective))
+    declarations: ^List(Spanned(Declaration))
+}
+
+data ImportDirective {
+    // path is a list of strings
+    path: ^List(String)
+}
+
+choice Declaration {
+    Data(^DataDecl),
+    Choice(^ChoiceDecl),
+    Fn(^FnDecl),
+    Extern(^ExternDecl),
+    Var(^VarDecl)
+}
+
+data DataDecl {
+    name: String
+    generic_params: ^List(String)
+    fields: ^List(FieldDecl)
+}
+
+data FieldDecl {
+    name: String
+    ty: ^Spanned(Type)
+}
+
+data ChoiceDecl {
+    name: String
+    generic_params: ^List(String)
+    variants: ^List(VariantDecl)
+}
+
+data VariantDecl {
+    name: String
+    associated_types: ^List(Spanned(Type))
+}
+
+data FnDecl {
+    name: String
+    generic_params: ^List(String)
+    params: ^List(Param)
+    // Optional types can use a nullable pointer ?^Spanned(Type)
+    return_type: ?^Spanned(Type)
+    body: ^Spanned(Block)
+}
+
+data ExternDecl {
+    name: String
+    generic_params: ^List(String)
+    params: ^List(Param)
+    return_type: ?^Spanned(Type)
+}
+
+data Param {
+    is_mut: Boolean
+    name: String
+    ty: ^Spanned(Type)
+}
+
+data Type {
+    name: String
+    generic_args: ^List(Spanned(Type))
+    is_array: Boolean
+    // Array size (0 for dynamic)
+    array_size: Int
+    is_ptr: Boolean
+    is_nullable: Boolean
+}
+
+data Block {
+    statements: ^List(Spanned(Statement))
+}
+
+choice Statement {
+    Var(^VarDecl),
+    Assignment(^Assignment),
+    If(^IfStmt),
+    While(^WhileStmt),
+    Return(^ReturnStmt),
+    Expr(^Spanned(Expression)),
+    Free(^Spanned(Expression)),
+    Break,
+    Continue
+}
+
+data VarDecl {
+    is_mut: Boolean
+    name: String
+    ty: ?^Spanned(Type)
+    initializer: ^Spanned(Expression)
+}
+
+choice AssignOp {
+    Assign, AddAssign, SubAssign, MulAssign, DivAssign
+}
+
+data Assignment {
+    target: ^Spanned(Expression)
+    op: AssignOp
+    value: ^Spanned(Expression)
+}
+
+data IfStmt {
+    condition: ^Spanned(Expression)
+    then_block: ^Spanned(Block)
+    else_branch: ?^Spanned(ElseBranch)
+}
+
+choice ElseBranch {
+    If(^IfStmt),
+    Block(^Block)
+}
+
+data WhileStmt {
+    condition: ^Spanned(Expression)
+    block: ^Spanned(Block)
+}
+
+data ReturnStmt {
+    value: ?^Spanned(Expression)
+}
+
+choice Expression {
+    Unary(^UnaryExpr),
+    Binary(^BinaryExpr),
+    Property(^PropertyAccess),
+    Call(^FunctionCall),
+    When(^WhenExpr),
+    Alloc(^AllocExpr),
+    Deref(^Spanned(Expression)),
+    VectorSlice(^VectorSliceExpr),
+    Index(^IndexExpr),
+    VariantConstruct(^VariantConstructExpr),
+    StructFieldAccess(^StructFieldAccessExpr),
+    StringIndex(^StringIndexExpr),
+    StringSlice(^StringSliceExpr),
+    StringEq(^StringEqExpr),
+    StringNotEq(^StringEqExpr),
+    Cast(^CastExpr),
+    Primary(^PrimaryExpr)
+}
+
+data CastExpr {
+    expr: ^Spanned(Expression)
+    target_type: ^Spanned(Type)
+}
+
+data AllocExpr {
+    ty: ^Spanned(Type)
+    arguments: ^List(Spanned(Expression))
+}
+
+data WhenExpr {
+    target: ^Spanned(Expression)
+    cases: ^List(WhenCase)
+    is_nullable: Boolean
+}
+
+data WhenCase {
+    variant_name: String
+    bindings: ^List(String)
+    body: ^Spanned(Block)
+}
+
+choice BinaryOp {
+    Pipe,
+    And, Or,
+    BitAnd, BitOr, BitXor,
+    Shl, Shr,
+    Eq, NotEq,
+    Lt, LtEq, Gt, GtEq,
+    Add, Sub,
+    Mul, Div, Mod
+}
+
+data BinaryExpr {
+    left: ^Spanned(Expression)
+    op: BinaryOp
+    right: ^Spanned(Expression)
+}
+
+choice UnaryOp {
+    Negate,
+    Not
+}
+
+data UnaryExpr {
+    op: UnaryOp
+    operand: ^Spanned(Expression)
+}
+
+choice PrimaryExpr {
+    Identifier(String),
+    Integer(Int),
+    Float(Float),
+    StringLiteral(String),
+    CharLiteral(Char),
+    Boolean(Boolean),
+    ListLiteral(^List(Spanned(Expression))),
+    NoneLiteral,
+    Grouped(^Spanned(Expression))
+}
+
+data FunctionCall {
+    callee: ^Spanned(Expression)
+    arguments: ^List(Spanned(Expression))
+}
+
+data PropertyAccess {
+    object: ^Spanned(Expression)
+    property: String
+}
+
+data StructFieldAccessExpr {
+    object: ^Spanned(Expression)
+    field_index: Int
+    field_type: String
+}
+
+data VectorSliceExpr {
+    target: ^Spanned(Expression)
+    start: ?^Spanned(Expression)
+    end: ?^Spanned(Expression)
+}
+
+data IndexExpr {
+    target: ^Spanned(Expression)
+    index: ^Spanned(Expression)
+}
+
+data VariantConstructExpr {
+    choice_name: String
+    variant_name: String
+    arguments: ^List(Spanned(Expression))
+}
+
+data StringIndexExpr {
+    target: ^Spanned(Expression)
+    index: ^Spanned(Expression)
+}
+
+data StringSliceExpr {
+    target: ^Spanned(Expression)
+    start: ?^Spanned(Expression)
+    end: ?^Spanned(Expression)
+}
+
+data StringEqExpr {
+    left: ^Spanned(Expression)
+    right: ^Spanned(Expression)
+}

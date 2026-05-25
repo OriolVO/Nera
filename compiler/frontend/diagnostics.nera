@@ -1,0 +1,82 @@
+// compiler/frontend/diagnostics.nera
+use std.string
+use std.io
+
+data Span {
+    start_line: Int
+    start_col: Int
+    end_line: Int
+    end_col: Int
+}
+
+fn alloc_span(start_line: Int, start_col: Int, end_line: Int, end_col: Int) -> ^Span {
+    mut span = alloc Span()
+    span^.start_line = start_line
+    span^.start_col = start_col
+    span^.end_line = end_line
+    span^.end_col = end_col
+    return span
+}
+
+fn merge_span(a: ^Span, b: ^Span) -> ^Span {
+    mut start_line = a^.start_line
+    if b^.start_line < a^.start_line {
+        start_line = b^.start_line
+    }
+    
+    mut start_col = a^.start_col
+    if a^.start_line == b^.start_line {
+        if b^.start_col < a^.start_col {
+            start_col = b^.start_col
+        }
+    }
+    if b^.start_line < a^.start_line {
+        start_col = b^.start_col
+    }
+
+    mut end_line = a^.end_line
+    if b^.end_line > a^.end_line {
+        end_line = b^.end_line
+    }
+    
+    mut end_col = a^.end_col
+    if a^.end_line == b^.end_line {
+        if b^.end_col > a^.end_col {
+            end_col = b^.end_col
+        }
+    }
+    if b^.end_line > a^.end_line {
+        end_col = b^.end_col
+    }
+
+    return alloc_span(start_line, start_col, end_line, end_col)
+}
+
+data DiagnosticError {
+    span: ^Span
+    message: String
+}
+
+fn alloc_diagnostic_error(span: ^Span, message: String) -> ^DiagnosticError {
+    mut err = alloc DiagnosticError()
+    err^.span = span
+    err^.message = message
+    return err
+}
+
+fn print_diagnostic(source: String, span: ^Span, message: String) {
+    puts(message)
+    // Detailed printing skipped for bootstrap simplicity
+}
+
+data Spanned(T) {
+    node: T
+    span: ^Span
+}
+
+fn alloc_spanned(T)(node: T, span: ^Span) -> ^Spanned(T) {
+    mut s = alloc Spanned(T)()
+    s^.node = node
+    s^.span = span
+    return s
+}

@@ -78,27 +78,27 @@ fn main() {
     
     // 1. let
     let tok1 = next_token(lex)
-    if get_id(tok1^.kind) == 3 { print(1) } else { print(0) }
+    if get_id(tok1^.kind) == 3 { print(1) } else { print(get_id(tok1^.kind)) }
     
     // 2. x (Identifier)
     let tok2 = next_token(lex)
-    if get_id(tok2^.kind) == 26 { print(1) } else { print(0) }
+    if get_id(tok2^.kind) == 26 { print(1) } else { print(get_id(tok2^.kind)) }
     
     // 3. = (Assign)
     let tok3 = next_token(lex)
-    if get_id(tok3^.kind) == 31 { print(1) } else { print(0) }
+    if get_id(tok3^.kind) == 31 { print(1) } else { print(get_id(tok3^.kind)) }
     
     // 4. 42 (Integer payload!)
     let tok4 = next_token(lex)
-    if get_id(tok4^.kind) == 42 { print(1) } else { print(0) }
+    if get_id(tok4^.kind) == 42 { print(1) } else { print(get_id(tok4^.kind)) }
     
     // 5. mut (after newline and comment)
     let tok5 = next_token(lex)
-    if get_id(tok5^.kind) == 4 { print(1) } else { print(0) }
+    if get_id(tok5^.kind) == 4 { print(1) } else { print(get_id(tok5^.kind)) }
     
     // 6. y (Identifier)
     let tok6 = next_token(lex)
-    if get_id(tok6^.kind) == 26 { print(1) } else { print(0) }
+    if get_id(tok6^.kind) == 26 { print(1) } else { print(get_id(tok6^.kind)) }
     
     free_lexer(lex)
 }

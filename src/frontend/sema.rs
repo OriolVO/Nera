@@ -139,6 +139,12 @@ impl Environment {
         }
     }
 
+    pub fn define_global(&mut self, name: String, symbol: Symbol) {
+        if let Some(scope) = self.scopes.first_mut() {
+            scope.insert(name, symbol);
+        }
+    }
+
     pub fn resolve(&self, name: &str) -> Option<&Symbol> {
         for scope in self.scopes.iter().rev() {
             if let Some(sym) = scope.get(name) {
@@ -264,6 +270,7 @@ impl<'a> SemanticAnalyzer<'a> {
             let args: Vec<String> = generic_args.iter().map(|a| self.resolve_type_ast(&a.node).to_string()).collect();
             format!("{}({})", template_name, args.join(", "))
         };
+
         if self.env.resolve(&concrete_name).is_some() {
             return;
         }
@@ -271,7 +278,7 @@ impl<'a> SemanticAnalyzer<'a> {
         // Find the template
         let template_decl = match self.generic_templates.get(template_name) {
             Some(decl) => decl.clone(),
-            None => return, // Could report error here if we wanted
+            None => return,
         };
 
         // Extract generic params
@@ -485,6 +492,7 @@ impl<'a> SemanticAnalyzer<'a> {
 
 
     fn extract_generic_args(&self, expected_ast: &Type, actual_info: &TypeInfo, generic_params: &[String], inferred_args: &mut Vec<Option<Type>>) {
+
         // Base case: is expected_ast.name one of the generic params?
         if let Some(pos) = generic_params.iter().position(|p| p == &expected_ast.name) {
             // Found a match! We need to reconstruct a Type from actual_info
@@ -591,7 +599,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 for field in &data_decl.fields {
                     fields.push((field.name.clone(), self.resolve_type_ast(&field.ty.node)));
                 }
-                self.env.define(data_decl.name.clone(), Symbol::Data(DataSymbol { fields }));
+                self.env.define_global(data_decl.name.clone(), Symbol::Data(DataSymbol { fields }));
             }
             Declaration::Fn(fn_decl) => {
                 let mut params = Vec::new();
@@ -603,7 +611,8 @@ impl<'a> SemanticAnalyzer<'a> {
                 } else {
                     TypeInfo::Void
                 };
-                self.env.define(fn_decl.name.clone(), Symbol::Function(FunctionSymbol { params, return_ty }));
+                self.env.define_global(fn_decl.name.clone(), Symbol::Function(FunctionSymbol { params, return_ty }));
+
             }
             Declaration::Extern(extern_decl) => {
                 let mut params = Vec::new();
@@ -615,7 +624,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 } else {
                     TypeInfo::Void
                 };
-                self.env.define(extern_decl.name.clone(), Symbol::Function(FunctionSymbol { params, return_ty }));
+                self.env.define_global(extern_decl.name.clone(), Symbol::Function(FunctionSymbol { params, return_ty }));
             }
             Declaration::Var(_) => {}
             Declaration::Choice(choice_decl) => {
@@ -626,7 +635,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         .collect();
                     variants.insert(variant.name.clone(), types);
                 }
-                self.env.define(choice_decl.name.clone(), Symbol::Choice(ChoiceSymbol { variants }));
+                self.env.define_global(choice_decl.name.clone(), Symbol::Choice(ChoiceSymbol { variants }));
             }
         }
     }
@@ -649,6 +658,7 @@ impl<'a> SemanticAnalyzer<'a> {
             Declaration::Choice(_) => {}
             Declaration::Extern(_) => {}
             Declaration::Fn(fn_decl) => {
+
                 self.env.enter_scope();
                 for param in &fn_decl.params {
                     let ty_info = self.resolve_type_ast(&param.ty.node);
@@ -820,6 +830,9 @@ impl<'a> SemanticAnalyzer<'a> {
                         ElseBranch::If(else_if) => {
                             let mut spanned_if = Spanned::new(Statement::If(else_if.clone()), else_branch.span.clone());
                             self.analyze_statement(&mut spanned_if);
+                            if let Statement::If(mutated_if) = spanned_if.node {
+                                *else_if = mutated_if;
+                            }
                         }
                         ElseBranch::Block(b) => {
                             self.env.enter_scope();
@@ -885,6 +898,7 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     fn analyze_expression(&mut self, expr: &mut Spanned<Expression>) -> TypeInfo {
+
         // Intercept method call desugaring before matching
         if let Expression::Call(func_call) = &mut expr.node {
             if let Expression::Property(prop_access) = &func_call.callee.node {
@@ -1094,10 +1108,8 @@ impl<'a> SemanticAnalyzer<'a> {
                             
                             let all_inferred = inferred_args.iter().all(|a| a.is_some());
                             if all_inferred {
-                                let args_unwrapped: Vec<Spanned<Type>> = inferred_args.into_iter()
-                                    .map(|t| Spanned::new(t.unwrap(), Span { start_line: 0, start_col: 0, end_line: 0, end_col: 0 }))
-                                    .collect();
-                                
+                                let args_unwrapped: Vec<Spanned<Type>> = inferred_args.into_iter().map(|a| Spanned::new(a.unwrap(), Span { start_line: 0, start_col: 0, end_line: 0, end_col: 0 })).collect();
+
                                 self.instantiate_generic(name, &args_unwrapped);
                                 
                                 let concrete_name = {
@@ -1106,6 +1118,7 @@ impl<'a> SemanticAnalyzer<'a> {
                                         .collect();
                                     format!("{}({})", name, args_str.join(", "))
                                 };
+                                
                                 
                                 *name = concrete_name.clone();
                                 
@@ -1132,6 +1145,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         }
                         return return_ty;
                     } else {
+
                         self.report_error(&func_call.callee.span, &format!("Undefined function '{}'", name));
                     }
                 }
