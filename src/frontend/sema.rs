@@ -165,6 +165,7 @@ pub struct SemanticAnalyzer<'a> {
     pub generic_templates: HashMap<String, Declaration>,
     pub instantiated_decls: Vec<Spanned<Declaration>>,
     pub in_loop: usize,
+    pub current_func_name: Option<String>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -178,7 +179,15 @@ impl<'a> SemanticAnalyzer<'a> {
             generic_templates: HashMap::new(),
             instantiated_decls: Vec::new(),
             in_loop: 0,
+            current_func_name: None,
         }
+    }
+
+    fn insert_inferred_type(&mut self, name: String, ty: TypeInfo) {
+        if let Some(func_name) = &self.current_func_name {
+            self.inferred_types.insert(format!("{}_{}", func_name, name), ty.clone());
+        }
+        self.inferred_types.insert(name, ty);
     }
 
     fn report_error(&mut self, span: &Span, message: &str) {
@@ -222,7 +231,21 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     pub fn resolve_type_ast(&mut self, ty: &Type) -> TypeInfo {
-        let base_name = self.format_type_name(ty);
+        let mut base_name = self.format_type_name(ty);
+        let mut is_nullable = false;
+        if base_name.starts_with('?') {
+            is_nullable = true;
+            base_name.remove(0);
+        }
+        let mut ptr_count = 0;
+        if ty.is_ptr {
+            ptr_count += 1;
+        }
+        while base_name.starts_with('^') {
+            ptr_count += 1;
+            base_name.remove(0);
+        }
+
         let base = match base_name.as_str() {
             "Int" => TypeInfo::Int,
             "Float" => TypeInfo::Float,
@@ -244,10 +267,10 @@ impl<'a> SemanticAnalyzer<'a> {
         } else {
             base
         };
-        if ty.is_ptr {
+        for _ in 0..ptr_count {
             resolved = TypeInfo::Pointer(Box::new(resolved));
         }
-        if ty.is_nullable {
+        if is_nullable || ty.is_nullable {
             resolved = TypeInfo::Nullable(Box::new(resolved));
         }
         resolved
@@ -356,24 +379,47 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     fn substitute_type(&mut self, ty: &mut Type, subs: &HashMap<String, Type>) {
-        if let Some(concrete_ty) = subs.get(&ty.name) {
-            // Apply substitution, keeping wrapper like pointer/array
-            let _original_ptr = ty.is_ptr;
-            let _original_array = ty.is_array;
-            let _original_size = ty.array_size;
-            let _original_nullable = ty.is_nullable;
+        let mut clean_name = ty.name.clone();
+        let mut ptr_count = 0;
+        while clean_name.starts_with('^') {
+            ptr_count += 1;
+            clean_name.remove(0);
+        }
 
-            ty.name = concrete_ty.name.clone();
+        if let Some(concrete_ty) = subs.get(&clean_name) {
+            let mut total_ptrs = ptr_count;
+            if ty.is_ptr { total_ptrs += 1; }
+            if concrete_ty.is_ptr { total_ptrs += 1; }
+            
+            let mut concrete_name = concrete_ty.name.clone();
+            while concrete_name.starts_with('^') {
+                total_ptrs += 1;
+                concrete_name.remove(0);
+            }
+
+            ty.name = concrete_name;
             ty.generic_args = concrete_ty.generic_args.clone();
             
-            // If the concrete type itself is already a pointer/array, this could stack
-            // For now just logically OR them (in a real system we'd chain them cleanly)
-            ty.is_ptr = ty.is_ptr || concrete_ty.is_ptr;
-            ty.is_array = ty.is_array || concrete_ty.is_array;
-            if concrete_ty.array_size.is_some() {
-                ty.array_size = concrete_ty.array_size;
+            ty.is_ptr = total_ptrs > 0;
+            if total_ptrs > 1 {
+                for _ in 0..(total_ptrs - 1) {
+                    ty.name = format!("^{}", ty.name);
+                }
             }
+
+            let was_array = ty.is_array;
+            let was_array_size = ty.array_size;
+
+            ty.is_array = concrete_ty.is_array; // Arrays don't compose like pointers/nullables
+            ty.array_size = concrete_ty.array_size;
             ty.is_nullable = ty.is_nullable || concrete_ty.is_nullable;
+
+            if was_array {
+                ty.name = format!("{}[]", ty.name);
+                if was_array_size.is_some() {
+                    ty.array_size = was_array_size;
+                }
+            }
         }
 
         // Substitute recursively in generic args
@@ -493,14 +539,34 @@ impl<'a> SemanticAnalyzer<'a> {
 
     fn extract_generic_args(&self, expected_ast: &Type, actual_info: &TypeInfo, generic_params: &[String], inferred_args: &mut Vec<Option<Type>>) {
 
-        // Base case: is expected_ast.name one of the generic params?
-        if let Some(pos) = generic_params.iter().position(|p| p == &expected_ast.name) {
+        let mut clean_expected = expected_ast.name.clone();
+        let mut expected_ptr_count = 0;
+        let mut expected_nullable = false;
+        if clean_expected.starts_with('?') {
+            expected_nullable = true;
+            clean_expected.remove(0);
+        }
+        if expected_ast.is_ptr {
+            expected_ptr_count += 1;
+        }
+        while clean_expected.starts_with('^') {
+            expected_ptr_count += 1;
+            clean_expected.remove(0);
+        }
+
+        // Base case: is clean_expected one of the generic params?
+        if let Some(pos) = generic_params.iter().position(|p| p == &clean_expected) {
             // Found a match! We need to reconstruct a Type from actual_info
             if inferred_args[pos].is_none() {
                 // Strip pointer/array layers based on what we expected
                 let mut inner_info = actual_info;
-                if expected_ast.is_ptr {
+                for _ in 0..expected_ptr_count {
                     if let TypeInfo::Pointer(inner) = inner_info {
+                        inner_info = inner;
+                    }
+                }
+                if expected_ast.is_nullable || expected_nullable {
+                    if let TypeInfo::Nullable(inner) = inner_info {
                         inner_info = inner;
                     }
                 }
@@ -509,40 +575,55 @@ impl<'a> SemanticAnalyzer<'a> {
                         inner_info = inner;
                     }
                 }
-                if expected_ast.is_nullable {
-                    if let TypeInfo::Nullable(inner) = inner_info {
-                        inner_info = inner;
-                    }
+                
+                // Reconstruct Type
+                let mut name_str = inner_info.to_string();
+                let mut is_ptr = false;
+                let mut ptr_count = 0;
+                while name_str.starts_with('^') {
+                    ptr_count += 1;
+                    name_str.remove(0);
+                }
+                if ptr_count > 0 {
+                    is_ptr = true;
+                    ptr_count -= 1;
+                }
+                for _ in 0..ptr_count {
+                    name_str = format!("^{}", name_str);
                 }
                 
-                // Reconstruct Type (basic approximation)
+                let mut is_nullable = false;
+                if name_str.starts_with('?') {
+                    is_nullable = true;
+                    name_str.remove(0);
+                }
+
                 let reconstructed = Type {
-                    name: inner_info.to_string(), // In real compiler, we'd parse this back into AST, but string format works for now since Monomorphization uses it as a unique key. Wait, no, we substitute it into AST!
-                    generic_args: vec![], // For now we just assume T resolves to a non-generic or fully resolved generic name string
+                    name: name_str,
+                    generic_args: vec![],
                     is_array: false,
                     array_size: None,
-                    is_ptr: false,
-                    is_nullable: false,
+                    is_ptr,
+                    is_nullable,
                 };
                 inferred_args[pos] = Some(reconstructed);
             }
         }
         
-        
         // Strip wrappers for deep inspection
         let mut inner_info = actual_info;
-        if expected_ast.is_ptr {
+        for _ in 0..expected_ptr_count {
             if let TypeInfo::Pointer(inner) = inner_info {
+                inner_info = inner;
+            }
+        }
+        if expected_ast.is_nullable || expected_nullable {
+            if let TypeInfo::Nullable(inner) = inner_info {
                 inner_info = inner;
             }
         }
         if expected_ast.is_array {
             if let TypeInfo::Array(inner, _) = inner_info {
-                inner_info = inner;
-            }
-        }
-        if expected_ast.is_nullable {
-            if let TypeInfo::Nullable(inner) = inner_info {
                 inner_info = inner;
             }
         }
@@ -562,7 +643,29 @@ impl<'a> SemanticAnalyzer<'a> {
                                 "String" => TypeInfo::String,
                                 "Boolean" => TypeInfo::Boolean,
                                 "Char" => TypeInfo::Char,
-                                other => TypeInfo::Custom(other.to_string()),
+                                "Void" => TypeInfo::Void,
+                                "Unknown" => TypeInfo::Unknown,
+                                other => {
+                                    let mut name = other.to_string();
+                                    let mut is_nullable = false;
+                                    if name.starts_with('?') {
+                                        is_nullable = true;
+                                        name.remove(0);
+                                    }
+                                    let mut ptr_count = 0;
+                                    while name.starts_with('^') {
+                                        ptr_count += 1;
+                                        name.remove(0);
+                                    }
+                                    let mut base = TypeInfo::Custom(name);
+                                    for _ in 0..ptr_count {
+                                        base = TypeInfo::Pointer(Box::new(base));
+                                    }
+                                    if is_nullable {
+                                        base = TypeInfo::Nullable(Box::new(base));
+                                    }
+                                    base
+                                }
                             };
                             self.extract_generic_args(&expected_arg.node, &arg_info, generic_params, inferred_args);
                         }
@@ -658,6 +761,8 @@ impl<'a> SemanticAnalyzer<'a> {
             Declaration::Choice(_) => {}
             Declaration::Extern(_) => {}
             Declaration::Fn(fn_decl) => {
+                let prev_func = self.current_func_name.clone();
+                self.current_func_name = Some(fn_decl.name.clone());
 
                 self.env.enter_scope();
                 for param in &fn_decl.params {
@@ -667,7 +772,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         ty: ty_info.clone(),
                         size: param.ty.node.array_size,
                     }));
-                    self.inferred_types.insert(param.name.clone(), ty_info);
+                    self.insert_inferred_type(param.name.clone(), ty_info);
                 }
 
                 let expected_ret = if let Some(ty) = &fn_decl.return_type {
@@ -680,6 +785,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.current_return_ty = None;
                 
                 self.env.exit_scope();
+                self.current_func_name = prev_func;
             }
             Declaration::Var(var_decl) => {
                 let inferred_ty = self.analyze_expression(&mut var_decl.initializer);
@@ -696,7 +802,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     explicit_info
                 } else {
                     if inferred_ty == TypeInfo::Unknown {
-                        self.report_error(&var_decl.initializer.span, "Empty array declarations require an explicit type annotation.");
+                        self.report_error(&var_decl.initializer.span, &format!("Cannot infer type for variable '{}', please provide an explicit type annotation.", var_decl.name));
                         TypeInfo::Unknown
                     } else {
                         inferred_ty
@@ -707,7 +813,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     ty: final_ty.clone(),
                     size,
                 }));
-                self.inferred_types.insert(var_decl.name.clone(), final_ty);
+                self.insert_inferred_type(var_decl.name.clone(), final_ty);
             }
         }
     }
@@ -727,7 +833,11 @@ impl<'a> SemanticAnalyzer<'a> {
                     size = explicit_ty.node.array_size;
                     let explicit_info = self.resolve_type_ast(&explicit_ty.node);
                     if explicit_info != inferred_ty && inferred_ty != TypeInfo::Unknown {
-                        let valid_null = matches!(&explicit_info, TypeInfo::Nullable(_)) && inferred_ty == TypeInfo::None;
+                        let valid_null = if let TypeInfo::Nullable(inner) = &explicit_info {
+                            **inner == inferred_ty || inferred_ty == TypeInfo::None
+                        } else {
+                            false
+                        };
                         if !valid_null {
                             self.report_error(&explicit_ty.span, &format!("Type mismatch: expected {}, found {}", explicit_info.to_string(), inferred_ty.to_string()));
                         }
@@ -735,7 +845,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     explicit_info
                 } else {
                     if inferred_ty == TypeInfo::Unknown {
-                        self.report_error(&var_decl.initializer.span, "Empty array declarations require an explicit type annotation.");
+                        self.report_error(&var_decl.initializer.span, &format!("Cannot infer type for variable '{}', please provide an explicit type annotation.", var_decl.name));
                         TypeInfo::Unknown
                     } else {
                         inferred_ty
@@ -747,7 +857,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     ty: final_ty.clone(),
                     size,
                 }));
-                self.inferred_types.insert(var_decl.name.clone(), final_ty);
+                self.insert_inferred_type(var_decl.name.clone(), final_ty);
             }
             Statement::Assignment(assignment) => {
                 let right_ty = self.analyze_expression(&mut assignment.value);
@@ -762,6 +872,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         false
                     };
                     if !valid_null {
+                        println!("DEBUG ASSIGN MISMATCH [L{}]: left={:?} right={:?}", assignment.value.span.start_line, left_ty, right_ty);
                         self.report_error(&assignment.value.span, &format!("Type mismatch in assignment: cannot assign {} to {}", right_ty.to_string(), left_ty.to_string()));
                     }
                 }
@@ -819,7 +930,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         ty: inner_ty.clone(),
                         size,
                     }));
-                    self.inferred_types.insert(name, inner_ty);
+                    self.insert_inferred_type(name, inner_ty);
                 }
                 
                 self.analyze_block(&mut if_stmt.then_block);
@@ -968,7 +1079,7 @@ impl<'a> SemanticAnalyzer<'a> {
                                     ty: ty.clone(),
                                     size: None,
                                 }));
-                                self.inferred_types.insert(binding.clone(), ty);
+                                self.insert_inferred_type(binding.clone(), ty);
                             }
                         } else {
                             self.report_error(&when_expr.target.span, &format!("Variant '{}' is not defined for choice '{}'", case.variant_name, choice_name.clone().unwrap_or_default()));
@@ -987,7 +1098,7 @@ impl<'a> SemanticAnalyzer<'a> {
                                 ty: *inner.clone(),
                                 size: None,
                             }));
-                            self.inferred_types.insert(case.variant_name.clone(), *inner.clone());
+                            self.insert_inferred_type(case.variant_name.clone(), *inner.clone());
                         }
                     }
                     
@@ -1029,6 +1140,41 @@ impl<'a> SemanticAnalyzer<'a> {
                 TypeInfo::Custom(var_construct.choice_name.clone())
             }
                         Expression::Call(func_call) => {
+                let mut collapsed = false;
+                let mut concrete_name_opt = None;
+                if let Expression::Call(inner_call) = &mut func_call.callee.node {
+                    if let Expression::Primary(PrimaryExpr::Identifier(name)) = &mut inner_call.callee.node {
+                        if self.generic_templates.contains_key(name) {
+                            let mut generic_args = Vec::new();
+                            let mut ok = true;
+                            for arg in &inner_call.arguments {
+                                if let Some(ty_ast) = self.expr_to_type(&arg.node) {
+                                    generic_args.push(Spanned::new(ty_ast, arg.span.clone()));
+                                } else {
+                                    ok = false;
+                                }
+                            }
+                            if ok {
+                                self.instantiate_generic(name, &generic_args);
+                                let concrete_name = {
+                                    let args_str: Vec<String> = generic_args.iter()
+                                        .map(|a| self.resolve_type_ast(&a.node).to_string())
+                                        .collect();
+                                    format!("{}({})", name, args_str.join(", "))
+                                };
+                                concrete_name_opt = Some(concrete_name);
+                                collapsed = true;
+                            }
+                        }
+                    }
+                }
+                
+                if collapsed {
+                    if let Some(concrete_name) = concrete_name_opt {
+                        func_call.callee.node = Expression::Primary(PrimaryExpr::Identifier(concrete_name));
+                    }
+                }
+
                 let mut arg_types = Vec::new();
                 for arg in &mut func_call.arguments {
                     arg_types.push(self.analyze_expression(arg));
@@ -1090,6 +1236,9 @@ impl<'a> SemanticAnalyzer<'a> {
                         None
                     };
                     
+                    if name.contains("new_hashmap") || name.contains("alloc_spanned") {
+                        println!("DEBUG CALL CALLEE: name={}, fn_info_is_none={}", name, fn_info.is_none());
+                    }
                     if fn_info.is_none() {
                         if let Some(template_decl) = self.generic_templates.get(name).cloned() {
                             let (generic_params, params) = match &template_decl {
@@ -1105,8 +1254,10 @@ impl<'a> SemanticAnalyzer<'a> {
                                     self.extract_generic_args(&param.ty.node, &arg_types[i], generic_params, &mut inferred_args);
                                 }
                             }
-                            
                             let all_inferred = inferred_args.iter().all(|a| a.is_some());
+                            if name == "new_hashmap" || name == "alloc_spanned" {
+                                println!("DEBUG GENERIC {}: all_inferred={}, inferred_args={:?}", name, all_inferred, inferred_args);
+                            }
                             if all_inferred {
                                 let args_unwrapped: Vec<Spanned<Type>> = inferred_args.into_iter().map(|a| Spanned::new(a.unwrap(), Span { start_line: 0, start_col: 0, end_line: 0, end_col: 0 })).collect();
 
@@ -1139,6 +1290,7 @@ impl<'a> SemanticAnalyzer<'a> {
                                 let is_dod_param = arg_ty.is_array() && arg_ty.get_array_inner().as_ref() == Some(expected_ty);
                                 
                                 if arg_ty != expected_ty && !is_dod_param && *arg_ty != TypeInfo::Unknown && *expected_ty != TypeInfo::Unknown {
+                                    println!("DEBUG FUNC ARGS [L{}]: arg_ast={:?}, expected={}, found={}", func_call.arguments[i].span.start_line, func_call.arguments[i].node, expected_ty.to_string(), arg_ty.to_string());
                                     self.report_error(&func_call.arguments[i].span, &format!("Argument {} type mismatch: expected {}, found {}", i+1, expected_ty.to_string(), arg_ty.to_string()));
                                 }
                             }
@@ -1275,13 +1427,20 @@ impl<'a> SemanticAnalyzer<'a> {
                     base_ty.to_string()
                 };
 
-                if let Some(Symbol::Data(data_sym)) = self.env.resolve(&base_name) {
-                    if let Some((field_index, (_, field_ty))) = data_sym.fields.iter().enumerate().find(|(_, (name, _))| name == &prop_access.property) {
+                let field_info = if let Some(Symbol::Data(data_sym)) = self.env.resolve(&base_name) {
+                    data_sym.fields.iter().enumerate().find(|(_, (name, _))| name == &prop_access.property)
+                        .map(|(idx, (_, ty))| (idx, ty.clone()))
+                } else {
+                    None
+                };
+
+                if self.env.resolve(&base_name).is_some() {
+                    if let Some((field_index, field_ty)) = field_info {
                         if let Some(root_name) = self.get_root_identifier(&prop_access.object) {
-                            self.inferred_types.insert(format!("{}_{}", root_name, prop_access.property), field_ty.clone());
+                            self.insert_inferred_type(format!("{}_{}", root_name, prop_access.property), field_ty.clone());
                         }
 
-                        if is_array {
+                    if is_array {
                             return TypeInfo::Array(Box::new(field_ty.clone()), None);
                         } else {
                             let ptr_object = if let Expression::Deref(inner) = &prop_access.object.node {
@@ -1391,10 +1550,17 @@ impl<'a> SemanticAnalyzer<'a> {
                 let is_scalar = |ty: &TypeInfo| {
                     matches!(ty, TypeInfo::Int | TypeInfo::Float | TypeInfo::Char | TypeInfo::Boolean)
                 };
+                
+                let is_pointer = |ty: &TypeInfo| {
+                    matches!(ty, TypeInfo::Pointer(_) | TypeInfo::Custom(_) | TypeInfo::Nullable(_))
+                };
 
                 if source_ty != TypeInfo::Unknown && target_ty != TypeInfo::Unknown {
-                    if !is_scalar(&source_ty) || !is_scalar(&target_ty) {
-                        self.report_error(&expr.span, "Explicit casting via 'as' is only supported for primitive scalar types (Int, Float, Char, Boolean)");
+                    let scalar_cast = is_scalar(&source_ty) && is_scalar(&target_ty);
+                    let ptr_cast = is_pointer(&source_ty) && is_pointer(&target_ty);
+                    
+                    if !scalar_cast && !ptr_cast {
+                        self.report_error(&expr.span, "Explicit casting via 'as' is only supported for primitive scalar types or between pointers");
                     }
                 }
 
@@ -1496,5 +1662,29 @@ impl<'a> SemanticAnalyzer<'a> {
         };
 
         Some(end_val - start_val)
+    }
+
+    fn expr_to_type(&self, expr: &Expression) -> Option<Type> {
+        match expr {
+            Expression::Primary(primary) => {
+                match primary {
+                    PrimaryExpr::Identifier(name) => Some(Type {
+                        name: name.clone(),
+                        generic_args: Vec::new(),
+                        is_array: false,
+                        array_size: None,
+                        is_ptr: false,
+                        is_nullable: false,
+                    }),
+                    _ => None,
+                }
+            }
+            Expression::Deref(inner) => {
+                let mut inner_ty = self.expr_to_type(&inner.node)?;
+                inner_ty.is_ptr = true;
+                Some(inner_ty)
+            }
+            _ => None,
+        }
     }
 }

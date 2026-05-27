@@ -2,6 +2,7 @@
 use compiler.midend.ir
 use compiler.frontend.ast
 use std.collections
+use std.string
 
 data StringListMapEntry {
     key: String
@@ -35,7 +36,24 @@ data StringInnerMap {
     entries: ^List(StringInnerMapEntry)
 }
 
-fn string_eq(s1: String, s2: String) -> Boolean { return s1 == s2 }
+fn string_string_map_put(map: ^StringStringMap, key: String, value: String) {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            mut updated = alloc StringStringMapEntry()
+            updated^.key = key
+            updated^.value = value
+            list_set(map^.entries, i, updated^)
+            return
+        }
+        i = i + 1
+    }
+    mut new_entry = alloc StringStringMapEntry()
+    new_entry^.key = key
+    new_entry^.value = value
+    list_push(map^.entries, new_entry^)
+}
 
 fn string_list_map_put(map: ^StringListMap, key: String, value: ^List(String)) {
     mut i = 0
@@ -176,6 +194,27 @@ data IRGenerator {
     array_params: ^StringStringMap
 }
 
+fn type_to_string(ty: ^Spanned(Type)) -> String {
+    mut res = ""
+    if ty^.node.is_nullable { res = concat_strings(res, "?") }
+    if ty^.node.is_ptr { res = concat_strings(res, "^") }
+    if ty^.node.is_array {
+        res = concat_strings(res, "[")
+        if ty^.node.array_size > 0 {
+            let num_str = int_to_string(ty^.node.array_size)
+            let prev_res = res
+            res = concat_strings(prev_res, num_str)
+            free_string(prev_res)
+            free_string(num_str)
+        }
+        let prev_res2 = res
+        res = concat_strings(prev_res2, "]")
+        free_string(prev_res2)
+    }
+    res = concat_strings(res, ty^.node.name)
+    return res
+}
+
 fn ir_gen_new() -> ^IRGenerator {
     mut gen = alloc IRGenerator()
     mut dummy_fn = alloc IRFunction()
@@ -221,7 +260,10 @@ fn ir_new_temp(mut gen: ^IRGenerator) -> ^IROperand {
 fn ir_new_label(mut gen: ^IRGenerator, prefix: String) -> String {
     let l = gen^.label_count
     gen^.label_count = gen^.label_count + 1
-    return concat_strings(prefix, int_to_string(l)) // TODO: Fix int_to_string usage
+    let num_str = int_to_string(l)
+    let res = concat_strings(prefix, num_str)
+    free_string(num_str)
+    return res
 }
 
 fn ir_emit(mut gen: ^IRGenerator, instr: IRInstruction) {
@@ -292,8 +334,8 @@ fn ir_start_block(mut gen: ^IRGenerator, name: String) {
 fn ir_generate(mut gen: ^IRGenerator, program: ^Program) {
     mut i = 0
     while i < program^.declarations^.length {
-        let span_decl = list_get(program^.declarations, i)
-        let decl = span_decl.node
+        let span_decl: ^Spanned(Declaration) = list_get(program^.declarations, i)
+        let decl = span_decl^.node
         ir_generate_declaration(gen, decl)
         i = i + 1
     }
@@ -312,13 +354,47 @@ fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
                 ret_ty_name = r^.node.name
             }
             
-            mut dummy_str = alloc String()
-            dummy_str^ = ""
-            mut params_list = new_list(10, dummy_str)
+            mut dummy_param = alloc IRParam()
+            dummy_param^.name = ""
+            dummy_param^.ty = ""
+            mut params_list = new_list(10, dummy_param)
             mut i = 0
             while i < fn_decl^.params^.length {
-                let param = list_get(fn_decl^.params, i)
-                list_push(params_list, param.name)
+                let param: ^Param = list_get(fn_decl^.params, i)
+                let ty_str = type_to_string(param^.ty)
+                
+                if param^.ty^.node.is_array {
+                    if param^.ty^.node.array_size > 0 {
+                        string_int_map_put(gen^.array_sizes, param^.name, param^.ty^.node.array_size)
+                    }
+                    let ty_name = param^.ty^.node.name
+                    string_string_map_put(gen^.array_params, param^.name, ty_name)
+                    
+                    let fields_opt = string_list_map_get(gen^.data_structs, ty_name)
+                    if fields_opt != None {
+                        let fields: ^List(String) = fields_opt
+                        mut f_idx = 0
+                        while f_idx < fields^.length {
+                            let field_name = list_get(fields, f_idx)
+                            mut ir_p = alloc IRParam()
+                            ir_p^.name = concat_strings(concat_strings(param^.name, "_"), field_name)
+                            ir_p^.ty = ty_str
+                            list_push(params_list, ir_p^)
+                            f_idx = f_idx + 1
+                        }
+                    } else {
+                        mut ir_p = alloc IRParam()
+                        ir_p^.name = param^.name
+                        ir_p^.ty = ty_str
+                        list_push(params_list, ir_p^)
+                    }
+                } else {
+                    mut ir_p = alloc IRParam()
+                    ir_p^.name = param^.name
+                    ir_p^.ty = ty_str
+                    list_push(params_list, ir_p^)
+                }
+                
                 i = i + 1
             }
             
@@ -369,13 +445,18 @@ fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
                 ret_ty_name = r^.node.name
             }
             
-            mut dummy_str = alloc String()
-            dummy_str^ = ""
-            mut params_list = new_list(10, dummy_str)
+            mut dummy_param = alloc IRParam()
+            dummy_param^.name = ""
+            dummy_param^.ty = ""
+            mut params_list = new_list(10, dummy_param)
             mut i = 0
             while i < extern_decl^.params^.length {
-                let param = list_get(extern_decl^.params, i)
-                list_push(params_list, param.name)
+                let param: ^Param = list_get(extern_decl^.params, i)
+                let ty_str = type_to_string(param^.ty)
+                mut ir_p = alloc IRParam()
+                ir_p^.name = param^.name
+                ir_p^.ty = ty_str
+                list_push(params_list, ir_p^)
                 i = i + 1
             }
             
@@ -403,7 +484,7 @@ fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
             mut i = 0
             while i < data_decl^.fields^.length {
                 let field = list_get(data_decl^.fields, i)
-                list_push(fields_list, field.name)
+                list_push(fields_list, field^.name)
                 i = i + 1
             }
             
@@ -416,8 +497,8 @@ fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
             
             mut i = 0
             while i < choice_decl^.variants^.length {
-                let variant = list_get(choice_decl^.variants, i)
-                string_int_map_put(tag_map, variant.name, i)
+                let variant: ^VariantDecl = list_get(choice_decl^.variants, i)
+                string_int_map_put(tag_map, variant^.name, i)
                 i = i + 1
             }
             
@@ -429,10 +510,8 @@ fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
 fn ir_generate_block(mut gen: ^IRGenerator, block: ^Spanned(Block)) {
     mut i = 0
     while i < block^.node.statements^.length {
-        let stmt = list_get(block^.node.statements, i)
-        mut stmt_ptr = alloc Spanned(Statement)()
-        stmt_ptr^ = stmt
-        ir_generate_statement(gen, stmt_ptr)
+        let stmt: ^Spanned(Statement) = list_get(block^.node.statements, i)
+        ir_generate_statement(gen, stmt)
         i = i + 1
     }
 }
@@ -786,9 +865,7 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
             mut i = 0
             while i < c^.arguments^.length {
                 let arg = list_get(c^.arguments, i)
-                mut arg_ptr = alloc Spanned(Expression)()
-                arg_ptr^ = arg
-                let arg_op = ir_generate_expression(gen, arg_ptr)
+                let arg_op = ir_generate_expression(gen, arg)
                 list_push(args_list, arg_op^)
                 i = i + 1
             }
@@ -821,30 +898,28 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
                 mut i = 0
                 while i < when_expr^.cases^.length {
                     let case_node = list_get(when_expr^.cases, i)
-                    if string_eq(case_node.variant_name, "None") {
+                    if string_eq(case_node^.variant_name, "None") {
                         // generate body
                         mut j = 0
-                        while j < case_node.body^.node.statements^.length {
-                            let stmt = list_get(case_node.body^.node.statements, j)
-                            mut stmt_ptr = alloc Spanned(Statement)()
-                            stmt_ptr^ = stmt
-                            if j == case_node.body^.node.statements^.length - 1 {
-                                when stmt_ptr^.node {
+                        while j < case_node^.body^.node.statements^.length {
+                            let stmt = list_get(case_node^.body^.node.statements, j)
+                            if j == case_node^.body^.node.statements^.length - 1 {
+                                when stmt^.node {
                                     Expr(e) -> {
                                         let val = ir_generate_expression(gen, e)
                                         ir_emit(gen, IRInstruction.Assign(dest_temp, val))
                                     }
-                                    Var(v) -> { ir_generate_statement(gen, stmt_ptr) }
-                                    Assignment(a) -> { ir_generate_statement(gen, stmt_ptr) }
-                                    If(i) -> { ir_generate_statement(gen, stmt_ptr) }
-                                    While(w) -> { ir_generate_statement(gen, stmt_ptr) }
-                                    Return(r) -> { ir_generate_statement(gen, stmt_ptr) }
-                                    Free(f) -> { ir_generate_statement(gen, stmt_ptr) }
-                                    Break -> { ir_generate_statement(gen, stmt_ptr) }
-                                    Continue -> { ir_generate_statement(gen, stmt_ptr) }
+                                    Var(v) -> { ir_generate_statement(gen, stmt) }
+                                    Assignment(a) -> { ir_generate_statement(gen, stmt) }
+                                    If(i) -> { ir_generate_statement(gen, stmt) }
+                                    While(w) -> { ir_generate_statement(gen, stmt) }
+                                    Return(r) -> { ir_generate_statement(gen, stmt) }
+                                    Free(f) -> { ir_generate_statement(gen, stmt) }
+                                    Break -> { ir_generate_statement(gen, stmt) }
+                                    Continue -> { ir_generate_statement(gen, stmt) }
                                 }
                             } else {
-                                ir_generate_statement(gen, stmt_ptr)
+                                ir_generate_statement(gen, stmt)
                             }
                             j = j + 1
                         }
@@ -861,33 +936,31 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
                 i = 0
                 while i < when_expr^.cases^.length {
                     let case_node = list_get(when_expr^.cases, i)
-                    if not string_eq(case_node.variant_name, "None") {
+                    if not string_eq(case_node^.variant_name, "None") {
                         mut bind_op = alloc IROperand()
-                        bind_op^ = IROperand.Variable(case_node.variant_name) // bindings[0] conceptually
+                        bind_op^ = IROperand.Variable(case_node^.variant_name) // bindings[0] conceptually
                         ir_emit(gen, IRInstruction.Assign(bind_op, target_op))
                         
                         mut j = 0
-                        while j < case_node.body^.node.statements^.length {
-                            let stmt = list_get(case_node.body^.node.statements, j)
-                            mut stmt_ptr = alloc Spanned(Statement)()
-                            stmt_ptr^ = stmt
-                            if j == case_node.body^.node.statements^.length - 1 {
-                                when stmt_ptr^.node {
+                        while j < case_node^.body^.node.statements^.length {
+                            let stmt = list_get(case_node^.body^.node.statements, j)
+                            if j == case_node^.body^.node.statements^.length - 1 {
+                                when stmt^.node {
                                     Expr(e) -> {
                                         let val = ir_generate_expression(gen, e)
                                         ir_emit(gen, IRInstruction.Assign(dest_temp, val))
                                     }
-                                    Var(v) -> { ir_generate_statement(gen, stmt_ptr) }
-                                    Assignment(a) -> { ir_generate_statement(gen, stmt_ptr) }
-                                    If(i) -> { ir_generate_statement(gen, stmt_ptr) }
-                                    While(w) -> { ir_generate_statement(gen, stmt_ptr) }
-                                    Return(r) -> { ir_generate_statement(gen, stmt_ptr) }
-                                    Free(f) -> { ir_generate_statement(gen, stmt_ptr) }
-                                    Break -> { ir_generate_statement(gen, stmt_ptr) }
-                                    Continue -> { ir_generate_statement(gen, stmt_ptr) }
+                                    Var(v) -> { ir_generate_statement(gen, stmt) }
+                                    Assignment(a) -> { ir_generate_statement(gen, stmt) }
+                                    If(i) -> { ir_generate_statement(gen, stmt) }
+                                    While(w) -> { ir_generate_statement(gen, stmt) }
+                                    Return(r) -> { ir_generate_statement(gen, stmt) }
+                                    Free(f) -> { ir_generate_statement(gen, stmt) }
+                                    Break -> { ir_generate_statement(gen, stmt) }
+                                    Continue -> { ir_generate_statement(gen, stmt) }
                                 }
                             } else {
-                                ir_generate_statement(gen, stmt_ptr)
+                                ir_generate_statement(gen, stmt)
                             }
                             j = j + 1
                         }
@@ -905,6 +978,32 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
             let tag_temp = ir_new_temp(gen)
             ir_emit(gen, IRInstruction.ExtractTag(tag_temp, target_op))
             
+            mut matched_map: ?^StringIntMap = None
+            mut max_matches = -1
+            
+            mut map_j = 0
+            while map_j < gen^.choice_tags^.entries^.length {
+                let entry = list_get(gen^.choice_tags^.entries, map_j)
+                let inner_map: ^StringIntMap = entry.value
+                
+                mut matches = 0
+                mut case_k = 0
+                while case_k < when_expr^.cases^.length {
+                    let case_node: ^WhenCase = list_get(when_expr^.cases, case_k)
+                    let inner_opt = string_int_map_get(inner_map, case_node^.variant_name)
+                    if inner_opt != None {
+                        matches = matches + 1
+                    }
+                    case_k = case_k + 1
+                }
+                
+                if matches > max_matches {
+                    max_matches = matches
+                    matched_map = inner_map
+                }
+                map_j = map_j + 1
+            }
+
             mut i = 0
             while i < when_expr^.cases^.length {
                 let case_node = list_get(when_expr^.cases, i)
@@ -912,20 +1011,12 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
                 let next_label = ir_new_label(gen, "when_next")
                 
                 mut expected_tag = 0
-                mut found = false
-                mut map_i = 0
-                while map_i < gen^.choice_tags^.entries^.length {
-                    let entry = list_get(gen^.choice_tags^.entries, map_i)
-                    let inner_map: ^StringIntMap = entry.value
-                    
-                    mut inner_opt = string_int_map_get(inner_map, case_node.variant_name)
+                if matched_map != None {
+                    let inner_map: ^StringIntMap = matched_map
+                    let inner_opt = string_int_map_get(inner_map, case_node^.variant_name)
                     if inner_opt != None {
                         let tag_val: Int = inner_opt
                         expected_tag = tag_val
-                        found = true
-                        map_i = gen^.choice_tags^.entries^.length
-                    } else {
-                        map_i = map_i + 1
                     }
                 }
                 
@@ -938,8 +1029,8 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
                 ir_start_block(gen, case_label)
                 
                 mut b_idx = 0
-                while b_idx < case_node.bindings^.length {
-                    let b_name = list_get(case_node.bindings, b_idx)
+                while b_idx < case_node^.bindings^.length {
+                    let b_name = list_get(case_node^.bindings, b_idx)
                     mut b_op = alloc IROperand()
                     b_op^ = IROperand.Variable(b_name)
                     ir_emit(gen, IRInstruction.ExtractPayload(b_op, target_op, b_idx))
@@ -947,27 +1038,25 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
                 }
                 
                 mut j = 0
-                while j < case_node.body^.node.statements^.length {
-                    let stmt = list_get(case_node.body^.node.statements, j)
-                    mut stmt_ptr = alloc Spanned(Statement)()
-                    stmt_ptr^ = stmt
-                    if j == case_node.body^.node.statements^.length - 1 {
-                        when stmt_ptr^.node {
+                while j < case_node^.body^.node.statements^.length {
+                    let stmt = list_get(case_node^.body^.node.statements, j)
+                    if j == case_node^.body^.node.statements^.length - 1 {
+                        when stmt^.node {
                             Expr(e) -> {
                                 let val = ir_generate_expression(gen, e)
                                 ir_emit(gen, IRInstruction.Assign(dest_temp, val))
                             }
-                            Var(v) -> { ir_generate_statement(gen, stmt_ptr) }
-                            Assignment(a) -> { ir_generate_statement(gen, stmt_ptr) }
-                            If(i) -> { ir_generate_statement(gen, stmt_ptr) }
-                            While(w) -> { ir_generate_statement(gen, stmt_ptr) }
-                            Return(r) -> { ir_generate_statement(gen, stmt_ptr) }
-                            Free(f) -> { ir_generate_statement(gen, stmt_ptr) }
-                            Break -> { ir_generate_statement(gen, stmt_ptr) }
-                            Continue -> { ir_generate_statement(gen, stmt_ptr) }
+                            Var(v) -> { ir_generate_statement(gen, stmt) }
+                            Assignment(a) -> { ir_generate_statement(gen, stmt) }
+                            If(i) -> { ir_generate_statement(gen, stmt) }
+                            While(w) -> { ir_generate_statement(gen, stmt) }
+                            Return(r) -> { ir_generate_statement(gen, stmt) }
+                            Free(f) -> { ir_generate_statement(gen, stmt) }
+                            Break -> { ir_generate_statement(gen, stmt) }
+                            Continue -> { ir_generate_statement(gen, stmt) }
                         }
                     } else {
-                        ir_generate_statement(gen, stmt_ptr)
+                        ir_generate_statement(gen, stmt)
                     }
                     j = j + 1
                 }
@@ -1062,9 +1151,7 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
             mut i = 0
             while i < var_expr^.arguments^.length {
                 let arg = list_get(var_expr^.arguments, i)
-                mut arg_ptr = alloc Spanned(Expression)()
-                arg_ptr^ = arg
-                let arg_op = ir_generate_expression(gen, arg_ptr)
+                let arg_op = ir_generate_expression(gen, arg)
                 list_push(args_list, arg_op^)
                 i = i + 1
             }

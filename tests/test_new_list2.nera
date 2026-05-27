@@ -1,0 +1,7 @@
+use std.collections
+data Spanned(T) { node: T }
+data ImportDirective { path: String }
+fn main() {
+    mut x = alloc ^Spanned(ImportDirective)()
+    let y: ^List(^Spanned(ImportDirective)) = new_list(2, x)
+}

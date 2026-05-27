@@ -4,3 +4,74 @@
 extern fn strlen(s: String) -> Int
 extern fn int_to_string(val: Int) -> String
 extern fn concat_strings(s1: String, s2: String) -> String
+extern fn string_equals(s1: String, s2: String) -> Boolean
+
+data StringSet {
+    items: ^List(String)
+}
+
+fn new_string_set() -> ^StringSet {
+    mut set = alloc StringSet()
+    mut dummy = alloc String()
+    set^.items = new_list(10, dummy)
+    return set
+}
+
+fn string_set_contains(set: ^StringSet, item: String) -> Boolean {
+    mut i = 0
+    while i < set^.items^.length {
+        if string_equals(list_get(set^.items, i), item) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn string_set_add(mut set: ^StringSet, item: String) {
+    if not string_set_contains(set, item) {
+        list_push(set^.items, item)
+    }
+}
+
+fn string_set_remove(mut set: ^StringSet, item: String) {
+    mut new_items = new_list(set^.items^.capacity, alloc String())
+    mut i = 0
+    while i < set^.items^.length {
+        let cur = list_get(set^.items, i)
+        if not string_equals(cur, item) {
+            list_push(new_items, cur)
+        }
+        i = i + 1
+    }
+    set^.items = new_items
+}
+
+fn string_set_copy(set: ^StringSet) -> ^StringSet {
+    mut new_set = new_string_set()
+    mut i = 0
+    while i < set^.items^.length {
+        list_push(new_set^.items, list_get(set^.items, i))
+        i = i + 1
+    }
+    return new_set
+}
+
+fn string_set_equals(set1: ^StringSet, set2: ^StringSet) -> Boolean {
+    if set1^.items^.length != set2^.items^.length {
+        return false
+    }
+    mut i = 0
+    while i < set1^.items^.length {
+        if not string_set_contains(set2, list_get(set1^.items, i)) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+
+extern fn string_contains(s: String, sub: String) -> Boolean
+extern fn free_string(s: String) -> Void
+

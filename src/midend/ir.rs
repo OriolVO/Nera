@@ -34,7 +34,7 @@ pub struct BasicBlock {
 #[derive(Debug, Clone, PartialEq)]
 pub struct IRFunction {
     pub name: String,
-    pub params: Vec<String>,
+    pub params: Vec<(String, String)>,
     pub return_type: String,
     pub blocks: Vec<BasicBlock>,
     pub is_extern: bool,
@@ -78,7 +78,7 @@ pub struct IRGenerator {
     active_block: Option<BasicBlock>,
     temp_count: usize,
     label_count: usize,
-    data_structs: HashMap<String, Vec<String>>,
+    pub data_structs: HashMap<String, Vec<String>>,
     array_params: HashMap<String, String>, // Tracks array param variables to their type name
     pub array_sizes: HashMap<String, i64>, // Tracks dynamic array sizes
     pub loop_labels: Vec<(String, String)>, // (start_label, end_label)
@@ -181,6 +181,7 @@ impl IRGenerator {
 
                 let mut flattened_params = Vec::new();
                 for param in &fn_decl.params {
+                    let ty_str = param.ty.node.to_string();
                     if param.ty.node.is_array {
                         if let Some(sz) = param.ty.node.array_size {
                             self.array_sizes.insert(param.name.clone(), sz);
@@ -189,13 +190,13 @@ impl IRGenerator {
                         self.array_params.insert(param.name.clone(), ty_name.clone());
                         if let Some(fields) = self.data_structs.get(ty_name) {
                             for field in fields {
-                                flattened_params.push(format!("{}_{}", param.name, field));
+                                flattened_params.push((format!("{}_{}", param.name, field), ty_str.clone()));
                             }
                         } else {
-                            flattened_params.push(param.name.clone());
+                            flattened_params.push((param.name.clone(), ty_str));
                         }
                     } else {
-                        flattened_params.push(param.name.clone());
+                        flattened_params.push((param.name.clone(), ty_str));
                     }
                 }
 
@@ -231,7 +232,8 @@ impl IRGenerator {
 
                 let mut flattened_params = Vec::new();
                 for param in &extern_decl.params {
-                    flattened_params.push(param.name.clone());
+                    let ty_str = param.ty.node.to_string();
+                    flattened_params.push((param.name.clone(), ty_str));
                 }
 
                 self.functions.push(IRFunction {
@@ -382,7 +384,7 @@ impl IRGenerator {
                 
                 if let Expression::StructFieldAccess(access) = &assignment.target.node {
                     let ptr_op = self.generate_expression(&access.object);
-                    let val_op = self.generate_expression(&assignment.value);
+                    let val_op = final_val.clone();
                     
                     self.emit(IRInstruction::StoreStructField(
                         ptr_op,
@@ -592,10 +594,9 @@ impl IRGenerator {
                 }
                 
                 let mut expected_tag = 0;
-                for tags in self.choice_tags.values() {
+                if let Some(tags) = self.choice_tags.get(&var_construct.choice_name) {
                     if let Some(tag) = tags.get(&var_construct.variant_name) {
                         expected_tag = *tag;
-                        break;
                     }
                 }
                 
@@ -716,15 +717,31 @@ impl IRGenerator {
                 let tag_temp = self.new_temp();
                 self.emit(IRInstruction::ExtractTag(tag_temp.clone(), target_op.clone()));
                 
+                let mut matched_choice_name = None;
+                let mut max_matches = -1;
+                for (choice_name, tags) in &self.choice_tags {
+                    let mut matches = 0;
+                    for case in &when_expr.cases {
+                        if tags.contains_key(&case.variant_name) {
+                            matches += 1;
+                        }
+                    }
+                    if matches > max_matches {
+                        max_matches = matches;
+                        matched_choice_name = Some(choice_name.clone());
+                    }
+                }
+
                 for case in &when_expr.cases {
                     let case_label = self.new_label("when_case");
                     let next_label = self.new_label("when_next");
                     
                     let mut expected_tag = 0;
-                    for tags in self.choice_tags.values() {
-                        if let Some(tag) = tags.get(&case.variant_name) {
-                            expected_tag = *tag;
-                            break;
+                    if let Some(choice_name) = &matched_choice_name {
+                        if let Some(tags) = self.choice_tags.get(choice_name) {
+                            if let Some(tag) = tags.get(&case.variant_name) {
+                                expected_tag = *tag;
+                            }
                         }
                     }
                     

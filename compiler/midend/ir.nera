@@ -27,9 +27,14 @@ data BasicBlock {
     terminator: Terminator
 }
 
+data IRParam {
+    name: String
+    ty: String
+}
+
 data IRFunction {
     name: String
-    params: ^List(String)
+    params: ^List(IRParam)
     return_type: String
     blocks: ^List(BasicBlock)
     is_extern: Boolean

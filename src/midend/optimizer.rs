@@ -7,6 +7,7 @@ pub struct OptimizedIR {
     pub functions: Vec<IRFunction>,
     pub soa_arrays: Vec<(String, i64)>, // Array names and their sizes
     pub global_instructions: Vec<IRInstruction>,
+    pub data_structs: HashMap<String, Vec<String>>,
 }
 
 pub struct IROptimizer;
@@ -16,7 +17,7 @@ impl IROptimizer {
         Self {}
     }
 
-    pub fn optimize(&self, functions: Vec<IRFunction>, global_instructions: Vec<IRInstruction>) -> Result<OptimizedIR, CompileError> {
+    pub fn optimize(&self, functions: Vec<IRFunction>, global_instructions: Vec<IRInstruction>, data_structs: HashMap<String, Vec<String>>) -> Result<OptimizedIR, CompileError> {
         let mut soa_arrays = self.run_soa_pass_globals(&global_instructions);
         let mut optimized_functions = Vec::new();
 
@@ -36,6 +37,7 @@ impl IROptimizer {
             functions: optimized_functions,
             soa_arrays,
             global_instructions,
+            data_structs,
         })
     }
 

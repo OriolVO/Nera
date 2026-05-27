@@ -1,0 +1,7 @@
+use std.collections
+data Spanned(T) { node: T }
+data Type { name: String }
+fn main() {
+    mut x = alloc ^Spanned(Type)()
+    let y: ^List(^Spanned(Type)) = new_list(2, x)
+}

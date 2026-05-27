@@ -1,0 +1,1615 @@
+// compiler/backend/llvm_gen.nera
+use std.collections
+use std.string
+use compiler.midend.ir
+use compiler.midend.optimizer
+use compiler.backend.llvm_ir
+use compiler.frontend.sema.types
+
+extern fn float_to_string(val: Float) -> String
+extern fn bool_to_string(val: Boolean) -> String
+extern fn string_starts_with(s: String, prefix: String) -> Boolean
+extern fn string_substring(s: String, start: Int, end: Int) -> String
+extern fn string_replace(s: String, old_str: String, new_str: String) -> String
+extern fn char_to_int(c: Char) -> Int
+
+data TypeInfoPtr { ptr: ^TypeInfo }
+data LLVMValuePtr { ptr: ^LLVMValue }
+data LLVMTypePtr { ptr: ^LLVMType }
+
+// ==========================================
+// IR BUILDER METHODS
+// ==========================================
+fn ir_builder_new(name: String) -> ^IRBuilder {
+    mut b = alloc IRBuilder()
+    mut mod = alloc LLVMModule()
+    mod^.name = name
+    mut dummy_fn = alloc LLVMFunction()
+    mod^.funcs = new_list(10, dummy_fn)
+    mut dummy_str = alloc String()
+    dummy_str^ = ""
+    mod^.declarations = new_list(10, dummy_str)
+    mut dummy_gs = alloc LLVMGlobalString()
+    mod^.global_strings = new_list(10, dummy_gs)
+    
+    b^.module = mod
+    b^.active_func = None
+    b^.active_block = None
+    b^.reg_count = 1
+    return b
+}
+
+fn ir_builder_declare(mut b: ^IRBuilder, decl: String) {
+    mut exists = false
+    mut i = 0
+    while i < b^.module^.declarations^.length {
+        let d = list_get(b^.module^.declarations, i)
+        if string_eq(d, decl) { exists = true }
+        i = i + 1
+    }
+    if not exists { list_push(b^.module^.declarations, decl) }
+}
+
+fn ir_builder_next_reg_name(mut b: ^IRBuilder) -> String {
+    let r = b^.reg_count
+    b^.reg_count = b^.reg_count + 1
+    return int_to_string(r)
+}
+
+fn ir_builder_push_instr(mut b: ^IRBuilder, instr: LLVMInstruction) {
+    mut blk_opt = b^.active_block
+    if blk_opt != None {
+        mut blk: ^LLVMBasicBlock = blk_opt
+        list_push(blk^.instrs, instr)
+    }
+}
+
+fn ir_builder_start_function(mut b: ^IRBuilder, name: String, ret_ty: ^LLVMType, params: ^List(LLVMParam)) {
+    b^.reg_count = 1
+    mut func = alloc LLVMFunction()
+    func^.name = name
+    func^.ret_ty = ret_ty
+    func^.params = params
+    mut dummy_blk = alloc LLVMBasicBlock()
+    func^.blocks = new_list(10, dummy_blk)
+    mut dummy_instr = alloc LLVMInstruction()
+    func^.allocas = new_list(10, dummy_instr)
+    b^.active_func = func
+}
+
+fn ir_builder_end_function(mut b: ^IRBuilder) {
+    mut blk_opt = b^.active_block
+    if blk_opt != None {
+        mut blk: ^LLVMBasicBlock = blk_opt
+        mut fn_opt = b^.active_func
+        if fn_opt != None {
+            mut func: ^LLVMFunction = fn_opt
+            list_push(func^.blocks, blk^)
+        }
+        b^.active_block = None
+    }
+    mut fn_opt2 = b^.active_func
+    if fn_opt2 != None {
+        let func2: ^LLVMFunction = fn_opt2
+        list_push(b^.module^.funcs, func2^)
+        b^.active_func = None
+    }
+}
+
+fn ir_builder_start_block(mut b: ^IRBuilder, name: String) {
+    mut blk_opt = b^.active_block
+    if blk_opt != None {
+        mut blk: ^LLVMBasicBlock = blk_opt
+        mut fn_opt = b^.active_func
+        if fn_opt != None {
+            mut func: ^LLVMFunction = fn_opt
+            list_push(func^.blocks, blk^)
+        }
+    }
+    mut new_blk = alloc LLVMBasicBlock()
+    new_blk^.name = name
+    mut dummy_instr = alloc LLVMInstruction()
+    new_blk^.instrs = new_list(10, dummy_instr)
+    b^.active_block = new_blk
+}
+
+fn ir_builder_current_block_name(b: ^IRBuilder) -> String {
+    mut blk_opt = b^.active_block
+    if blk_opt != None {
+        let blk: ^LLVMBasicBlock = blk_opt
+        return blk^.name
+    }
+    return "entry"
+}
+
+fn ir_builder_build_alloca(mut b: ^IRBuilder, name: String, ty: ^LLVMType) -> ^LLVMValue {
+    mut fn_opt = b^.active_func
+    if fn_opt != None {
+        mut func: ^LLVMFunction = fn_opt
+        list_push(func^.allocas, LLVMInstruction.Alloca(name, ty))
+    }
+    mut v = alloc LLVMValue()
+    mut ty_ptr = alloc LLVMType()
+    ty_ptr^ = ty^
+    mut pty = alloc LLVMType()
+    pty^ = LLVMType.Pointer(ty_ptr)
+    v^ = LLVMValue.Reg(name, pty)
+    return v
+}
+
+fn ir_builder_build_load(mut b: ^IRBuilder, ptr: ^LLVMValue, align: Int) -> ^LLVMValue {
+    let ptr_ty = llvm_value_get_type(ptr)
+    mut ret_ty = alloc LLVMType()
+    ret_ty^ = LLVMType.I64
+    when ptr_ty^ { 
+        Pointer(inner) -> { ret_ty = inner } 
+        I1 -> {} I8 -> {} I32 -> {} I64 -> {} Double -> {} Void -> {} Array(s, i) -> {} Named(n) -> {} 
+    }
+    let dest = ir_builder_next_reg_name(b)
+    ir_builder_push_instr(b, LLVMInstruction.Load(dest, ret_ty, ptr, align))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ret_ty)
+    return v
+}
+
+fn ir_builder_build_store(mut b: ^IRBuilder, val: ^LLVMValue, ptr: ^LLVMValue, align: Int) {
+    ir_builder_push_instr(b, LLVMInstruction.Store(val, ptr, align))
+}
+
+fn ir_builder_build_gep(mut b: ^IRBuilder, base_ty: ^LLVMType, ptr: ^LLVMValue, indices: ^List(LLVMValue)) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    mut raw_ptr = alloc LLVMValue()
+    raw_ptr^ = ptr^
+    mut i8_inner = alloc LLVMType()
+    i8_inner^ = LLVMType.I8
+    mut pi8_ty = alloc LLVMType()
+    pi8_ty^ = LLVMType.Pointer(i8_inner)
+    
+    when raw_ptr^ {
+        Reg(name, t) -> { raw_ptr^ = LLVMValue.Reg(name, pi8_ty) }
+        Global(name, t) -> { raw_ptr^ = LLVMValue.Global(name, pi8_ty) }
+        ConstGlobalStringPtr(n_str, l_str) -> {} ConstI1(c_b) -> {} ConstI8(i_8) -> {} ConstI32(i_32) -> {} ConstI64(i_64) -> {} ConstDouble(f_d) -> {} Null(t_n) -> {}
+    }
+    
+    mut ret_ty = alloc LLVMType()
+    ret_ty^ = LLVMType.Pointer(base_ty)
+    ir_builder_push_instr(b, LLVMInstruction.GetElementPtr(dest, base_ty, raw_ptr, indices))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ret_ty)
+    return v
+}
+
+fn ir_builder_build_add(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.Add(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_sub(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.Sub(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_mul(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.Mul(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_sdiv(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.SDiv(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_srem(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.SRem(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_fadd(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.FAdd(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_fsub(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.FSub(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_fmul(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.FMul(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_fdiv(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.FDiv(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_icmp(mut b: ^IRBuilder, pred: String, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.ICmp(dest, pred, ty, l, r))
+    mut v = alloc LLVMValue()
+    mut bool_ty = alloc LLVMType()
+    bool_ty^ = LLVMType.I1
+    v^ = LLVMValue.Reg(dest, bool_ty)
+    return v
+}
+
+fn ir_builder_build_fcmp(mut b: ^IRBuilder, pred: String, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.FCmp(dest, pred, ty, l, r))
+    mut v = alloc LLVMValue()
+    mut bool_ty = alloc LLVMType()
+    bool_ty^ = LLVMType.I1
+    v^ = LLVMValue.Reg(dest, bool_ty)
+    return v
+}
+
+fn ir_builder_build_and(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.And(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_or(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.Or(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_xor(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.Xor(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_shl(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.Shl(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_ashr(mut b: ^IRBuilder, l: ^LLVMValue, r: ^LLVMValue) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(l)
+    ir_builder_push_instr(b, LLVMInstruction.AShr(dest, ty, l, r))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, ty)
+    return v
+}
+
+fn ir_builder_build_zext(mut b: ^IRBuilder, val: ^LLVMValue, dest_ty: ^LLVMType) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(val)
+    ir_builder_push_instr(b, LLVMInstruction.ZExt(dest, dest_ty, val, ty))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, dest_ty)
+    return v
+}
+
+fn ir_builder_build_trunc(mut b: ^IRBuilder, val: ^LLVMValue, dest_ty: ^LLVMType) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(val)
+    ir_builder_push_instr(b, LLVMInstruction.Trunc(dest, dest_ty, val, ty))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, dest_ty)
+    return v
+}
+
+fn ir_builder_build_sitofp(mut b: ^IRBuilder, val: ^LLVMValue, dest_ty: ^LLVMType) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(val)
+    ir_builder_push_instr(b, LLVMInstruction.SIToFP(dest, dest_ty, val, ty))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, dest_ty)
+    return v
+}
+
+fn ir_builder_build_fptosi(mut b: ^IRBuilder, val: ^LLVMValue, dest_ty: ^LLVMType) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(val)
+    ir_builder_push_instr(b, LLVMInstruction.FPToSI(dest, dest_ty, val, ty))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, dest_ty)
+    return v
+}
+
+fn ir_builder_build_bitcast(mut b: ^IRBuilder, val: ^LLVMValue, dest_ty: ^LLVMType) -> ^LLVMValue {
+    let dest = ir_builder_next_reg_name(b)
+    let ty = llvm_value_get_type(val)
+    ir_builder_push_instr(b, LLVMInstruction.BitCast(dest, dest_ty, val, ty))
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.Reg(dest, dest_ty)
+    return v
+}
+
+fn ir_builder_build_call(mut b: ^IRBuilder, ret_ty: ^LLVMType, name: String, args: ^List(LLVMValue)) -> ^LLVMValue {
+    mut dest_opt: ?String = None
+    mut v = alloc LLVMValue()
+    when ret_ty^ {
+        Void -> { v^ = LLVMValue.Null(ret_ty) }
+        I1 -> {
+            let dest = ir_builder_next_reg_name(b)
+            dest_opt = dest
+            v^ = LLVMValue.Reg(dest, ret_ty)
+        }
+        I8 -> {
+            let dest = ir_builder_next_reg_name(b)
+            dest_opt = dest
+            v^ = LLVMValue.Reg(dest, ret_ty)
+        }
+        I32 -> {
+            let dest = ir_builder_next_reg_name(b)
+            dest_opt = dest
+            v^ = LLVMValue.Reg(dest, ret_ty)
+        }
+        I64 -> {
+            let dest = ir_builder_next_reg_name(b)
+            dest_opt = dest
+            v^ = LLVMValue.Reg(dest, ret_ty)
+        }
+        Double -> {
+            let dest = ir_builder_next_reg_name(b)
+            dest_opt = dest
+            v^ = LLVMValue.Reg(dest, ret_ty)
+        }
+        Pointer(i) -> {
+            let dest = ir_builder_next_reg_name(b)
+            dest_opt = dest
+            v^ = LLVMValue.Reg(dest, ret_ty)
+        }
+        Array(s, i) -> {}
+        Named(n) -> {}
+    }
+    ir_builder_push_instr(b, LLVMInstruction.Call(dest_opt, ret_ty, name, args))
+    return v
+}
+
+fn ir_builder_build_br(mut b: ^IRBuilder, lbl: String, meta: String) {
+    ir_builder_push_instr(b, LLVMInstruction.Br(lbl, meta))
+}
+
+fn ir_builder_build_cond_br(mut b: ^IRBuilder, cond: ^LLVMValue, t_lbl: String, f_lbl: String, meta: String) {
+    ir_builder_push_instr(b, LLVMInstruction.CondBr(cond, t_lbl, f_lbl, meta))
+}
+
+fn ir_builder_build_ret(mut b: ^IRBuilder, val_opt: ?^LLVMValue) {
+    ir_builder_push_instr(b, LLVMInstruction.Ret(val_opt))
+}
+
+fn ir_builder_build_unreachable(mut b: ^IRBuilder) {
+    ir_builder_push_instr(b, LLVMInstruction.Unreachable)
+}
+
+fn ir_builder_build_global_string_ptr(mut b: ^IRBuilder, value: String) -> ^LLVMValue {
+    let name = concat_strings(".str.", int_to_string(b^.module^.global_strings^.length))
+    let len = 32
+    mut gs = alloc LLVMGlobalString()
+    gs^.name = name
+    gs^.val = value
+    gs^.len = len
+    list_push(b^.module^.global_strings, gs^)
+    mut v = alloc LLVMValue()
+    v^ = LLVMValue.ConstGlobalStringPtr(name, len)
+    return v
+}
+
+// ==========================================
+// LLVM GENERATOR
+// ==========================================
+
+data LLVMGenerator {
+    type_env: ^HashMap(TypeInfoPtr)
+    builder: ^IRBuilder
+    temp_map: ^HashMap(LLVMValuePtr)
+    function_params: ^HashMap(LLVMValuePtr)
+    scalar_vars: ^StringSet
+    main_arena_ptr: ?^LLVMValue
+    shared_vec_idx: ?^LLVMValue
+    func_ret_types: ^HashMap(LLVMTypePtr)
+    actual_soa_arrays: ^List(SoAArray)
+}
+
+fn llvm_generator_new() -> ^LLVMGenerator {
+    mut gen = alloc LLVMGenerator()
+    
+    mut dummy_tip = alloc TypeInfoPtr()
+    gen^.type_env = new_hashmap(dummy_tip)
+    
+    gen^.builder = ir_builder_new("nera_program")
+    
+    mut dummy_lvp = alloc LLVMValuePtr()
+    gen^.temp_map = new_hashmap(dummy_lvp)
+    gen^.function_params = new_hashmap(dummy_lvp)
+    
+    gen^.scalar_vars = new_string_set()
+    gen^.main_arena_ptr = None
+    gen^.shared_vec_idx = None
+    
+    mut dummy_ltp = alloc LLVMTypePtr()
+    gen^.func_ret_types = new_hashmap(dummy_ltp)
+    
+    mut dummy_soa = alloc SoAArray()
+    gen^.actual_soa_arrays = new_list(10, dummy_soa)
+    
+    return gen
+}
+
+fn llvm_generator_str_to_llvm_type(gen: ^LLVMGenerator, ty_str: String) -> ^LLVMType {
+    mut ret = alloc LLVMType()
+    if string_eq(ty_str, "Int") or string_eq(ty_str, "Char") {
+        ret^ = LLVMType.I64
+    } else if string_eq(ty_str, "Float") {
+        ret^ = LLVMType.Double
+    } else if string_eq(ty_str, "Boolean") {
+        ret^ = LLVMType.I1
+    } else if string_eq(ty_str, "String") {
+        mut inner = alloc LLVMType()
+        inner^ = LLVMType.I8
+        ret^ = LLVMType.Pointer(inner)
+    } else {
+        mut inner = alloc LLVMType()
+        inner^ = LLVMType.I8
+        ret^ = LLVMType.Pointer(inner)
+    }
+    return ret
+}
+
+fn llvm_generator_type_to_llvm(gen: ^LLVMGenerator, nera_ty: ^TypeInfo) -> ^LLVMType {
+    mut ret = alloc LLVMType()
+    when nera_ty^ {
+        Int -> { ret^ = LLVMType.I64 }
+        Float -> { ret^ = LLVMType.Double }
+        Boolean -> { ret^ = LLVMType.I1 }
+        String -> {
+            mut inner = alloc LLVMType()
+            inner^ = LLVMType.I8
+            ret^ = LLVMType.Pointer(inner)
+        }
+        Array(arr_info) -> {
+            let a_info: ^TypeInfoArray = arr_info
+            let i_ll = llvm_generator_type_to_llvm(gen, a_info^.inner)
+            ret^ = LLVMType.Pointer(i_ll)
+        }
+        Pointer(inner) -> {
+            let i_ll = llvm_generator_type_to_llvm(gen, inner)
+            ret^ = LLVMType.Pointer(i_ll)
+        }
+        Void -> { ret^ = LLVMType.Void }
+        Custom(s) -> {
+            mut inner = alloc LLVMType()
+            inner^ = LLVMType.I64
+            ret^ = LLVMType.Pointer(inner)
+        }
+        Nullable(inner) -> { ret^ = LLVMType.I64 }
+        NoneVariant -> {
+            mut inner = alloc LLVMType()
+            inner^ = LLVMType.I8
+            ret^ = LLVMType.Pointer(inner)
+        }
+        Char -> { ret^ = LLVMType.I64 }
+        Unknown -> { ret^ = LLVMType.I64 }
+    }
+    return ret
+}
+
+fn llvm_generator_return_type_str_to_llvm(gen: ^LLVMGenerator, ret_type_str: String) -> ^LLVMType {
+    mut s = ret_type_str
+    let is_nullable = string_starts_with(s, "?")
+    if is_nullable { s = string_substring(s, 1, 999) }
+    let is_ptr = string_starts_with(s, "^")
+    if is_ptr { s = string_substring(s, 1, 999) }
+    
+    mut ret_info = alloc TypeInfo()
+    if string_eq(s, "Int") { ret_info^ = TypeInfo.Int }
+    else if string_eq(s, "Float") { ret_info^ = TypeInfo.Float }
+    else if string_eq(s, "Boolean") { ret_info^ = TypeInfo.Boolean }
+    else if string_eq(s, "String") { ret_info^ = TypeInfo.String }
+    else if string_eq(s, "Char") { ret_info^ = TypeInfo.Int }
+    else if string_eq(s, "Void") { ret_info^ = TypeInfo.Void }
+    else { ret_info^ = TypeInfo.Custom(s) }
+    
+    if is_ptr {
+        mut p = alloc TypeInfo()
+        p^ = TypeInfo.Pointer(ret_info)
+        ret_info = p
+    }
+    if is_nullable {
+        mut p = alloc TypeInfo()
+        p^ = TypeInfo.Nullable(ret_info)
+        ret_info = p
+    }
+    
+    return llvm_generator_type_to_llvm(gen, ret_info)
+}
+
+fn llvm_generator_operand_to_value(mut gen: ^LLVMGenerator, op: ^IROperand) -> ^LLVMValue {
+    mut ret = alloc LLVMValue()
+    when op^ {
+        LiteralInt(v) -> { ret^ = LLVMValue.ConstI64(v) }
+        LiteralFloat(v) -> { ret^ = LLVMValue.ConstDouble(v) }
+        LiteralString(v) -> { ret = ir_builder_build_global_string_ptr(gen^.builder, v) }
+        LiteralChar(v) -> { 
+            let int_char_val = char_to_int(v)
+            ret^ = LLVMValue.ConstI64(int_char_val) 
+        }
+        LiteralBool(v) -> { ret^ = LLVMValue.ConstI1(v) }
+        Variable(name) -> {
+            mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, name)
+            if ptr_opt != None {
+                let ptr_wrap_val: LLVMValuePtr = ptr_opt
+                mut ptr_wrap = alloc LLVMValuePtr()
+                ptr_wrap^ = ptr_wrap_val
+                let ptr = ptr_wrap^.ptr
+                let is_scalar = string_set_contains(gen^.scalar_vars, name) or string_starts_with(name, "param_")
+                if is_scalar {
+                    ret = ir_builder_build_load(gen^.builder, ptr, 0)
+                } else {
+                    ret = ptr
+                }
+            } else {
+                mut ty = alloc TypeInfo()
+                ty^ = TypeInfo.Int
+                mut ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, name)
+                if ty_opt != None {
+                    let tw_val: TypeInfoPtr = ty_opt
+                    mut tw = alloc TypeInfoPtr()
+                    tw^ = tw_val
+                    ty = tw^.ptr
+                }
+                ret^ = LLVMValue.Reg(name, llvm_generator_type_to_llvm(gen, ty))
+            }
+        }
+        TempReg(t) -> {
+            let t_name = int_to_string(t)
+            mut v_opt: ?LLVMValuePtr = hashmap_get(gen^.temp_map, t_name)
+            if v_opt != None {
+                let vw_val: LLVMValuePtr = v_opt
+                mut vw = alloc LLVMValuePtr()
+                vw^ = vw_val
+                ret = vw^.ptr
+            } else {
+                mut lty = alloc LLVMType()
+                lty^ = LLVMType.I64
+                ret^ = LLVMValue.Reg(concat_strings("t", t_name), lty)
+            }
+        }
+        Void -> {
+            mut vty = alloc LLVMType()
+            vty^ = LLVMType.Void
+            ret^ = LLVMValue.Null(vty)
+        }
+        NoneLiteral -> {
+            mut vty = alloc LLVMType()
+            vty^ = LLVMType.I8
+            mut pty = alloc LLVMType()
+            pty^ = LLVMType.Pointer(vty)
+            ret^ = LLVMValue.Null(pty)
+        }
+    }
+    return ret
+}
+
+fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstruction) {
+    when instr^ {
+        Assign(dest, src) -> {
+            let src_val = llvm_generator_operand_to_value(gen, src)
+            when dest^ {
+                Variable(name) -> {
+                    mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, name)
+                    if ptr_opt != None {
+                        let ptr_wrap_val: LLVMValuePtr = ptr_opt
+                        mut ptr_wrap = alloc LLVMValuePtr()
+                        ptr_wrap^ = ptr_wrap_val
+                        ir_builder_build_store(gen^.builder, src_val, ptr_wrap^.ptr, 0)
+                    } else {
+                        mut vw = alloc LLVMValuePtr()
+                        vw^.ptr = src_val
+                        hashmap_put(gen^.function_params, name, vw^)
+                    }
+                }
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = src_val
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        UnaryOp(dest, op, operand) -> {
+            let op_val = llvm_generator_operand_to_value(gen, operand)
+            mut res = op_val
+            when op {
+                Negate -> {
+                    mut zero = alloc LLVMValue()
+                    zero^ = LLVMValue.ConstI64(0)
+                    res = ir_builder_build_sub(gen^.builder, zero, op_val)
+                }
+                Not -> {
+                    mut one = alloc LLVMValue()
+                    one^ = LLVMValue.ConstI1(true)
+                    res = ir_builder_build_xor(gen^.builder, op_val, one)
+                }
+            }
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = res
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        BinaryOp(dest, op, left, right) -> {
+            let l_val = llvm_generator_operand_to_value(gen, left)
+            let r_val = llvm_generator_operand_to_value(gen, right)
+            mut res = l_val
+            when op {
+                Add -> { res = ir_builder_build_add(gen^.builder, l_val, r_val) }
+                Sub -> { res = ir_builder_build_sub(gen^.builder, l_val, r_val) }
+                Mul -> { res = ir_builder_build_mul(gen^.builder, l_val, r_val) }
+                Div -> { res = ir_builder_build_sdiv(gen^.builder, l_val, r_val) }
+                Mod -> { res = ir_builder_build_srem(gen^.builder, l_val, r_val) }
+                Eq -> { res = ir_builder_build_icmp(gen^.builder, "eq", l_val, r_val) }
+                NotEq -> { res = ir_builder_build_icmp(gen^.builder, "ne", l_val, r_val) }
+                Lt -> { res = ir_builder_build_icmp(gen^.builder, "slt", l_val, r_val) }
+                LtEq -> { res = ir_builder_build_icmp(gen^.builder, "sle", l_val, r_val) }
+                Gt -> { res = ir_builder_build_icmp(gen^.builder, "sgt", l_val, r_val) }
+                GtEq -> { res = ir_builder_build_icmp(gen^.builder, "sge", l_val, r_val) }
+                And -> { res = ir_builder_build_and(gen^.builder, l_val, r_val) }
+                Or -> { res = ir_builder_build_or(gen^.builder, l_val, r_val) }
+                BitAnd -> { res = ir_builder_build_and(gen^.builder, l_val, r_val) }
+                BitOr -> { res = ir_builder_build_or(gen^.builder, l_val, r_val) }
+                BitXor -> { res = ir_builder_build_xor(gen^.builder, l_val, r_val) }
+                Shl -> { res = ir_builder_build_shl(gen^.builder, l_val, r_val) }
+                Shr -> { res = ir_builder_build_ashr(gen^.builder, l_val, r_val) }
+                Pipe -> {}
+            }
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = res
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        LoadProperty(dest, obj, prop) -> {
+            mut raw_name = ""
+            when obj^ {
+                Variable(n) -> { raw_name = n }
+                LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} TempReg(t) -> {} Void -> {} NoneLiteral -> {}
+            }
+            let field_key = concat_strings(raw_name, concat_strings("_", prop))
+            
+            mut arr_ptr = alloc LLVMValue()
+            mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
+            if ptr_opt != None {
+                let w_val: LLVMValuePtr = ptr_opt
+                mut w = alloc LLVMValuePtr()
+                w^ = w_val
+                arr_ptr = w^.ptr
+            }
+            
+            let loaded = ir_builder_build_load(gen^.builder, arr_ptr, 8)
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = loaded
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        StoreProperty(obj, prop, val) -> {
+            mut raw_name = ""
+            when obj^ {
+                Variable(n) -> { raw_name = n }
+                LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} TempReg(t) -> {} Void -> {} NoneLiteral -> {}
+            }
+            let field_key = concat_strings(raw_name, concat_strings("_", prop))
+            
+            mut arr_ptr = alloc LLVMValue()
+            mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
+            if ptr_opt != None {
+                let w_val: LLVMValuePtr = ptr_opt
+                mut w = alloc LLVMValuePtr()
+                w^ = w_val
+                arr_ptr = w^.ptr
+            }
+            
+            let val_val = llvm_generator_operand_to_value(gen, val)
+            ir_builder_build_store(gen^.builder, val_val, arr_ptr, 8)
+        }
+        Call(dest_opt, callee, args) -> {
+            mut callee_str = ""
+            when callee^ {
+                Variable(n) -> { callee_str = n }
+                LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} TempReg(t) -> {} Void -> {} NoneLiteral -> {}
+            }
+            callee_str = string_replace(callee_str, "(", "_")
+            callee_str = string_replace(callee_str, ")", "")
+            callee_str = string_replace(callee_str, ", ", "_")
+            callee_str = string_replace(callee_str, "^", "Ptr")
+            
+            mut dummy_val = alloc LLVMValue()
+            mut arg_vals = new_list(10, dummy_val)
+            mut i = 0
+            while i < args^.length {
+                let a_ptr = list_get(args, i)
+                mut a = alloc IROperand()
+                a^ = a_ptr
+                let a_val = llvm_generator_operand_to_value(gen, a)
+                list_push(arg_vals, a_val^)
+                i = i + 1
+            }
+            
+            mut ret_ty = alloc LLVMType()
+            ret_ty^ = LLVMType.I64
+            if dest_opt == None { ret_ty^ = LLVMType.Void }
+            
+            let res = ir_builder_build_call(gen^.builder, ret_ty, callee_str, arg_vals)
+            
+            if dest_opt != None {
+                let d: ^IROperand = dest_opt
+                when d^ {
+                    TempReg(t) -> {
+                        mut vw = alloc LLVMValuePtr()
+                        vw^.ptr = res
+                        hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    }
+                    LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+                }
+            }
+        }
+        ExtractTag(dest, target_struct) -> {
+            let target_val = llvm_generator_operand_to_value(gen, target_struct)
+            
+            mut idx_val = alloc LLVMValue()
+            idx_val^ = LLVMValue.ConstI64(0)
+            mut dummy_lv = alloc LLVMValue()
+            mut idx_list = new_list(1, dummy_lv)
+            list_push(idx_list, idx_val^)
+            
+            mut i64_ty = alloc LLVMType()
+            i64_ty^ = LLVMType.I64
+            mut pi64_ty = alloc LLVMType()
+            pi64_ty^ = LLVMType.Pointer(i64_ty)
+            
+            let casted_target = ir_builder_build_bitcast(gen^.builder, target_val, pi64_ty)
+            let ptr = ir_builder_build_gep(gen^.builder, i64_ty, casted_target, idx_list)
+            let tag_val = ir_builder_build_load(gen^.builder, ptr, 8)
+            
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = tag_val
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                Variable(name) -> {
+                    mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, name)
+                    if ptr_opt != None {
+                        let ptr_wrap_val: LLVMValuePtr = ptr_opt
+                        mut ptr_wrap = alloc LLVMValuePtr()
+                        ptr_wrap^ = ptr_wrap_val
+                        ir_builder_build_store(gen^.builder, tag_val, ptr_wrap^.ptr, 0)
+                    } else {
+                        mut vw = alloc LLVMValuePtr()
+                        vw^.ptr = tag_val
+                        hashmap_put(gen^.function_params, name, vw^)
+                    }
+                }
+                LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        Alloc(dest, ty_name, size) -> {
+            mut size_val = alloc LLVMValue()
+            size_val^ = LLVMValue.ConstI64(size)
+            mut dummy_lv = alloc LLVMValue()
+            mut arg_list = new_list(1, dummy_lv)
+            list_push(arg_list, size_val^)
+            
+            mut i8_ptr = alloc LLVMType()
+            mut i8_inner = alloc LLVMType()
+            i8_inner^ = LLVMType.I8
+            i8_ptr^ = LLVMType.Pointer(i8_inner)
+            
+            let alloc_call = ir_builder_build_call(gen^.builder, i8_ptr, "malloc", arg_list)
+            
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = alloc_call
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        Free(target) -> {
+            let ptr_val = llvm_generator_operand_to_value(gen, target)
+            mut i8_ptr = alloc LLVMType()
+            mut i8_inner = alloc LLVMType()
+            i8_inner^ = LLVMType.I8
+            i8_ptr^ = LLVMType.Pointer(i8_inner)
+            let void_ptr = ir_builder_build_bitcast(gen^.builder, ptr_val, i8_ptr)
+            
+            mut dummy_lv = alloc LLVMValue()
+            mut arg_list = new_list(1, dummy_lv)
+            list_push(arg_list, void_ptr^)
+            mut vty = alloc LLVMType()
+            vty^ = LLVMType.Void
+            let ignore = ir_builder_build_call(gen^.builder, vty, "free", arg_list)
+        }
+        ExtractPayload(dest, target_struct, field_idx) -> {
+            let target_val = llvm_generator_operand_to_value(gen, target_struct)
+            
+            let offset = field_idx + 1
+            
+            mut idx_val = alloc LLVMValue()
+            idx_val^ = LLVMValue.ConstI64(offset)
+            mut dummy_lv = alloc LLVMValue()
+            mut idx_list = new_list(1, dummy_lv)
+            list_push(idx_list, idx_val^)
+            
+            mut target_llvm_ty = alloc LLVMType()
+            target_llvm_ty^ = LLVMType.I64
+            
+            when dest^ {
+                Variable(name) -> {
+                    mut ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, name)
+                    if ty_opt != None {
+                        let tw_val: TypeInfoPtr = ty_opt
+                        mut tw = alloc TypeInfoPtr()
+                        tw^ = tw_val
+                        target_llvm_ty = llvm_generator_type_to_llvm(gen, tw^.ptr)
+                    }
+                }
+                TempReg(t) -> {} LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Void -> {} NoneLiteral -> {}
+            }
+            
+            mut i64_ty = alloc LLVMType()
+            i64_ty^ = LLVMType.I64
+            mut pi64_ty = alloc LLVMType()
+            pi64_ty^ = LLVMType.Pointer(i64_ty)
+            
+            let casted_target = ir_builder_build_bitcast(gen^.builder, target_val, pi64_ty)
+            let ptr = ir_builder_build_gep(gen^.builder, i64_ty, casted_target, idx_list)
+            
+            mut ptarget_ty = alloc LLVMType()
+            ptarget_ty^ = LLVMType.Pointer(target_llvm_ty)
+            
+            let casted_ptr = ir_builder_build_bitcast(gen^.builder, ptr, ptarget_ty)
+            let loaded_val = ir_builder_build_load(gen^.builder, casted_ptr, 8)
+            
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = loaded_val
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                Variable(name) -> {
+                    mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, name)
+                    if ptr_opt != None {
+                        let ptr_wrap_val: LLVMValuePtr = ptr_opt
+                        mut ptr_wrap = alloc LLVMValuePtr()
+                        ptr_wrap^ = ptr_wrap_val
+                        
+                        let dest_ptr_ty = llvm_value_get_type(ptr_wrap^.ptr)
+                        let payload_val_ty = llvm_value_get_type(loaded_val)
+                        mut p_payload_val_ty = alloc LLVMType()
+                        p_payload_val_ty^ = LLVMType.Pointer(payload_val_ty)
+                        let target_ptr = ir_builder_build_bitcast(gen^.builder, ptr_wrap^.ptr, p_payload_val_ty)
+                        
+                        ir_builder_build_store(gen^.builder, loaded_val, target_ptr, 0)
+                    } else {
+                        mut alloca_ptr = ir_builder_build_alloca(gen^.builder, concat_strings("ptr_", name), target_llvm_ty)
+                        ir_builder_build_store(gen^.builder, loaded_val, alloca_ptr, 0)
+                        
+                        mut vw = alloc LLVMValuePtr()
+                        vw^.ptr = alloca_ptr
+                        hashmap_put(gen^.function_params, name, vw^)
+                        string_set_add(gen^.scalar_vars, name)
+                    }
+                }
+                LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        ConstructADT(dest, tag_value, args) -> {
+            let total_size = 8 + (args^.length * 8)
+            
+            mut size_val = alloc LLVMValue()
+            size_val^ = LLVMValue.ConstI64(total_size)
+            mut dummy_lv = alloc LLVMValue()
+            mut malloc_args = new_list(1, dummy_lv)
+            list_push(malloc_args, size_val^)
+            
+            mut i8_inner = alloc LLVMType()
+            i8_inner^ = LLVMType.I8
+            mut pi8_ty = alloc LLVMType()
+            pi8_ty^ = LLVMType.Pointer(i8_inner)
+            
+            let struct_ptr = ir_builder_build_call(gen^.builder, pi8_ty, "malloc", malloc_args)
+            
+            mut tag_val = alloc LLVMValue()
+            tag_val^ = LLVMValue.ConstI64(tag_value)
+            
+            mut i64_ty = alloc LLVMType()
+            i64_ty^ = LLVMType.I64
+            mut pi64_ty = alloc LLVMType()
+            pi64_ty^ = LLVMType.Pointer(i64_ty)
+            
+            let casted_tag_ptr = ir_builder_build_bitcast(gen^.builder, struct_ptr, pi64_ty)
+            ir_builder_build_store(gen^.builder, tag_val, casted_tag_ptr, 8)
+            
+            mut i = 0
+            while i < args^.length {
+                let arg_op = list_get(args, i)
+                mut arg_op_ptr = alloc IROperand()
+                arg_op_ptr^ = arg_op
+                let arg_val = llvm_generator_operand_to_value(gen, arg_op_ptr)
+                
+                let current_offset = 8 + (i * 8)
+                mut off_val = alloc LLVMValue()
+                off_val^ = LLVMValue.ConstI64(current_offset)
+                mut idx_list = new_list(1, dummy_lv)
+                list_push(idx_list, off_val^)
+                
+                let field_ptr = ir_builder_build_gep(gen^.builder, i8_inner, struct_ptr, idx_list)
+                
+                let val_ty = llvm_value_get_type(arg_val)
+                mut pval_ty = alloc LLVMType()
+                pval_ty^ = LLVMType.Pointer(val_ty)
+                
+                let casted_field_ptr = ir_builder_build_bitcast(gen^.builder, field_ptr, pval_ty)
+                ir_builder_build_store(gen^.builder, arg_val, casted_field_ptr, 8)
+                
+                i = i + 1
+            }
+            
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = struct_ptr
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        LoadStructField(dest, ptr_op, field_idx, ty_name) -> {
+            let ptr_val = llvm_generator_operand_to_value(gen, ptr_op)
+            
+            mut idx_val = alloc LLVMValue()
+            idx_val^ = LLVMValue.ConstI64(field_idx)
+            mut dummy_lv = alloc LLVMValue()
+            mut idx_list = new_list(1, dummy_lv)
+            list_push(idx_list, idx_val^)
+            
+            mut i64_ty = alloc LLVMType()
+            i64_ty^ = LLVMType.I64
+            mut pi64_ty = alloc LLVMType()
+            pi64_ty^ = LLVMType.Pointer(i64_ty)
+            
+            let casted_i64_ptr = ir_builder_build_bitcast(gen^.builder, ptr_val, pi64_ty)
+            let ptr = ir_builder_build_gep(gen^.builder, i64_ty, casted_i64_ptr, idx_list)
+            
+            let final_ty = llvm_generator_str_to_llvm_type(gen, ty_name)
+            mut pfinal_ty = alloc LLVMType()
+            pfinal_ty^ = LLVMType.Pointer(final_ty)
+            
+            let casted_ptr = ir_builder_build_bitcast(gen^.builder, ptr, pfinal_ty)
+            let loaded_val = ir_builder_build_load(gen^.builder, casted_ptr, 8)
+            
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = loaded_val
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        StoreStructField(ptr_op, field_idx, val_op) -> {
+            let ptr_val = llvm_generator_operand_to_value(gen, ptr_op)
+            let val_val = llvm_generator_operand_to_value(gen, val_op)
+            
+            mut idx_val = alloc LLVMValue()
+            idx_val^ = LLVMValue.ConstI64(field_idx)
+            mut dummy_lv = alloc LLVMValue()
+            mut idx_list = new_list(1, dummy_lv)
+            list_push(idx_list, idx_val^)
+            
+            mut i64_ty = alloc LLVMType()
+            i64_ty^ = LLVMType.I64
+            mut pi64_ty = alloc LLVMType()
+            pi64_ty^ = LLVMType.Pointer(i64_ty)
+            
+            let casted_i64_ptr = ir_builder_build_bitcast(gen^.builder, ptr_val, pi64_ty)
+            let element_ptr = ir_builder_build_gep(gen^.builder, i64_ty, casted_i64_ptr, idx_list)
+            
+            let val_ty = llvm_value_get_type(val_val)
+            mut pval_ty = alloc LLVMType()
+            pval_ty^ = LLVMType.Pointer(val_ty)
+            
+            let target_ptr = ir_builder_build_bitcast(gen^.builder, element_ptr, pval_ty)
+            ir_builder_build_store(gen^.builder, val_val, target_ptr, 8)
+        }
+        LoadArrayElement(dest, arr_name, prop_name, idx_op, sz) -> {
+            let idx_val = llvm_generator_operand_to_value(gen, idx_op)
+            let field_key = concat_strings(arr_name, concat_strings("_", prop_name))
+            
+            mut arr_ptr = alloc LLVMValue()
+            mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
+            if ptr_opt != None {
+                let w_val: LLVMValuePtr = ptr_opt
+                mut w = alloc LLVMValuePtr()
+                w^ = w_val
+                arr_ptr = w^.ptr
+            }
+            let base_ptr = ir_builder_build_load(gen^.builder, arr_ptr, 8)
+            
+            mut byte_idx = idx_val
+            mut eight = alloc LLVMValue()
+            eight^ = LLVMValue.ConstI64(8)
+            byte_idx = ir_builder_build_mul(gen^.builder, idx_val, eight)
+            
+            mut dummy_lv = alloc LLVMValue()
+            mut idx_list = new_list(1, dummy_lv)
+            list_push(idx_list, byte_idx^)
+            
+            mut i8_inner = alloc LLVMType()
+            i8_inner^ = LLVMType.I8
+            let ptr = ir_builder_build_gep(gen^.builder, i8_inner, base_ptr, idx_list)
+            
+            mut i64_ty = alloc LLVMType()
+            i64_ty^ = LLVMType.I64
+            mut pi64_ty = alloc LLVMType()
+            pi64_ty^ = LLVMType.Pointer(i64_ty)
+            
+            let casted_ptr = ir_builder_build_bitcast(gen^.builder, ptr, pi64_ty)
+            let loaded_val = ir_builder_build_load(gen^.builder, casted_ptr, 8)
+            
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = loaded_val
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        StoreArrayElement(arr_name, prop_name, idx_op, val_op, sz) -> {
+            let idx_val = llvm_generator_operand_to_value(gen, idx_op)
+            let val_val = llvm_generator_operand_to_value(gen, val_op)
+            let field_key = concat_strings(arr_name, concat_strings("_", prop_name))
+            
+            mut arr_ptr = alloc LLVMValue()
+            mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
+            if ptr_opt != None {
+                let w_val: LLVMValuePtr = ptr_opt
+                mut w = alloc LLVMValuePtr()
+                w^ = w_val
+                arr_ptr = w^.ptr
+            }
+            let base_ptr = ir_builder_build_load(gen^.builder, arr_ptr, 8)
+            
+            mut byte_idx = idx_val
+            mut eight = alloc LLVMValue()
+            eight^ = LLVMValue.ConstI64(8)
+            byte_idx = ir_builder_build_mul(gen^.builder, idx_val, eight)
+            
+            mut dummy_lv = alloc LLVMValue()
+            mut idx_list = new_list(1, dummy_lv)
+            list_push(idx_list, byte_idx^)
+            
+            mut i8_inner = alloc LLVMType()
+            i8_inner^ = LLVMType.I8
+            let ptr = ir_builder_build_gep(gen^.builder, i8_inner, base_ptr, idx_list)
+            
+            let val_ty = llvm_value_get_type(val_val)
+            mut pval_ty = alloc LLVMType()
+            pval_ty^ = LLVMType.Pointer(val_ty)
+            
+            let casted_ptr = ir_builder_build_bitcast(gen^.builder, ptr, pval_ty)
+            ir_builder_build_store(gen^.builder, val_val, casted_ptr, 8)
+        }
+        LoadStringChar(dest, str_ptr, idx_op) -> {
+            let str_val = llvm_generator_operand_to_value(gen, str_ptr)
+            let idx_val = llvm_generator_operand_to_value(gen, idx_op)
+            
+            mut dummy_lv = alloc LLVMValue()
+            mut idx_list = new_list(1, dummy_lv)
+            list_push(idx_list, idx_val^)
+            
+            mut i8_inner = alloc LLVMType()
+            i8_inner^ = LLVMType.I8
+            let char_ptr = ir_builder_build_gep(gen^.builder, i8_inner, str_val, idx_list)
+            let raw_char = ir_builder_build_load(gen^.builder, char_ptr, 1)
+            
+            mut i64_ty = alloc LLVMType()
+            i64_ty^ = LLVMType.I64
+            let extended_char = ir_builder_build_zext(gen^.builder, raw_char, i64_ty)
+            
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = extended_char
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        Substring(dest, str_ptr, start_op, end_op) -> {
+            let str_val = llvm_generator_operand_to_value(gen, str_ptr)
+            let s_val = llvm_generator_operand_to_value(gen, start_op)
+            let e_val = llvm_generator_operand_to_value(gen, end_op)
+            
+            mut dummy_lv = alloc LLVMValue()
+            mut args = new_list(3, dummy_lv)
+            list_push(args, str_val^)
+            list_push(args, s_val^)
+            list_push(args, e_val^)
+            
+            mut i8_inner = alloc LLVMType()
+            i8_inner^ = LLVMType.I8
+            mut pi8_ty = alloc LLVMType()
+            pi8_ty^ = LLVMType.Pointer(i8_inner)
+            
+            let sub_str = ir_builder_build_call(gen^.builder, pi8_ty, "string_substring", args)
+            
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = sub_str
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        StringCompare(dest, left_op, right_op, is_eq_flag) -> {
+            let l_val = llvm_generator_operand_to_value(gen, left_op)
+            let r_val = llvm_generator_operand_to_value(gen, right_op)
+            
+            mut dummy_lv = alloc LLVMValue()
+            mut args = new_list(2, dummy_lv)
+            list_push(args, l_val^)
+            list_push(args, r_val^)
+            
+            mut i1_ty = alloc LLVMType()
+            i1_ty^ = LLVMType.I1
+            
+            let cmp_res = ir_builder_build_call(gen^.builder, i1_ty, "string_starts_with", args)
+            
+            mut final_res = cmp_res
+            if not is_eq_flag {
+                mut one = alloc LLVMValue()
+                one^ = LLVMValue.ConstI1(true)
+                final_res = ir_builder_build_xor(gen^.builder, cmp_res, one)
+            }
+            
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = final_res
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        FlatVectorApply(target_array, ops, start_op, end_op, size) -> {
+            let s_val = llvm_generator_operand_to_value(gen, start_op)
+            let e_val = llvm_generator_operand_to_value(gen, end_op)
+            
+            mut i64_ty = alloc LLVMType()
+            i64_ty^ = LLVMType.I64
+            let idx_ptr = ir_builder_build_alloca(gen^.builder, ir_builder_next_reg_name(gen^.builder), i64_ty)
+            ir_builder_build_store(gen^.builder, s_val, idx_ptr, 8)
+            
+            let cond_lbl = concat_strings("vloop.cond.", ir_builder_next_reg_name(gen^.builder))
+            let body_lbl = concat_strings("vloop.body.", ir_builder_next_reg_name(gen^.builder))
+            let end_lbl = concat_strings("vloop.end.", ir_builder_next_reg_name(gen^.builder))
+            
+            ir_builder_build_br(gen^.builder, cond_lbl, "")
+            
+            ir_builder_start_block(gen^.builder, cond_lbl)
+            let current_idx = ir_builder_build_load(gen^.builder, idx_ptr, 8)
+            let cmp_res = ir_builder_build_icmp(gen^.builder, "slt", current_idx, e_val)
+            ir_builder_build_cond_br(gen^.builder, cmp_res, body_lbl, end_lbl, "")
+            
+            ir_builder_start_block(gen^.builder, body_lbl)
+            
+            mut k = 0
+            while k < ops^.length {
+                let op_val = list_get(ops, k)
+                mut op = alloc FlatVectorApplyOp()
+                op^ = op_val
+                let field_key = concat_strings(target_array, concat_strings("_", op^.prop))
+                
+                mut arr_var_ptr = alloc LLVMValue()
+                mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
+                if ptr_opt != None {
+                    let w_val: LLVMValuePtr = ptr_opt
+                    mut w = alloc LLVMValuePtr()
+                    w^ = w_val
+                    arr_var_ptr = w^.ptr
+                }
+                let base_array_ptr = ir_builder_build_load(gen^.builder, arr_var_ptr, 8)
+                
+                mut eight = alloc LLVMValue()
+                eight^ = LLVMValue.ConstI64(8)
+                let byte_offset = ir_builder_build_mul(gen^.builder, current_idx, eight)
+                
+                mut dummy_lv = alloc LLVMValue()
+                mut idx_list = new_list(1, dummy_lv)
+                list_push(idx_list, byte_offset^)
+                
+                mut i8_inner = alloc LLVMType()
+                i8_inner^ = LLVMType.I8
+                let target_element_ptr = ir_builder_build_gep(gen^.builder, i8_inner, base_array_ptr, idx_list)
+                
+                mut pi64_ty = alloc LLVMType()
+                pi64_ty^ = LLVMType.Pointer(i64_ty)
+                let casted_target_ptr = ir_builder_build_bitcast(gen^.builder, target_element_ptr, pi64_ty)
+                
+                let old_val = ir_builder_build_load(gen^.builder, casted_target_ptr, 8)
+                
+                mut rhs_val = old_val
+                mut operand_ptr = alloc VectorOperand()
+                operand_ptr^ = op^.operand
+                when operand_ptr^ {
+                    Scalar(scalar_op) -> {
+                        rhs_val = llvm_generator_operand_to_value(gen, scalar_op)
+                    }
+                    Vector(rhs_arr, rhs_prop) -> {
+                        let rhs_key = concat_strings(rhs_arr, concat_strings("_", rhs_prop))
+                        mut rhs_var_ptr = alloc LLVMValue()
+                        mut r_ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, rhs_key)
+                        if r_ptr_opt != None {
+                            let rw_val: LLVMValuePtr = r_ptr_opt
+                            mut rw = alloc LLVMValuePtr()
+                            rw^ = rw_val
+                            rhs_var_ptr = rw^.ptr
+                        }
+                        
+                        let r_base = ir_builder_build_load(gen^.builder, rhs_var_ptr, 8)
+                        mut r_idx_list = new_list(1, dummy_lv)
+                        list_push(r_idx_list, byte_offset^)
+                        
+                        let r_element_ptr = ir_builder_build_gep(gen^.builder, i8_inner, r_base, r_idx_list)
+                        let r_casted = ir_builder_build_bitcast(gen^.builder, r_element_ptr, pi64_ty)
+                        rhs_val = ir_builder_build_load(gen^.builder, r_casted, 8)
+                    }
+                }
+                
+                mut final_computed_val = rhs_val
+                let assign_op = op^.op
+                when assign_op {
+                    Assign -> {}
+                    AddAssign -> { final_computed_val = ir_builder_build_add(gen^.builder, old_val, rhs_val) }
+                    SubAssign -> { final_computed_val = ir_builder_build_sub(gen^.builder, old_val, rhs_val) }
+                    MulAssign -> { final_computed_val = ir_builder_build_mul(gen^.builder, old_val, rhs_val) }
+                    DivAssign -> { final_computed_val = ir_builder_build_sdiv(gen^.builder, old_val, rhs_val) }
+                }
+                
+                ir_builder_build_store(gen^.builder, final_computed_val, casted_target_ptr, 8)
+                k = k + 1
+            }
+            
+            mut one = alloc LLVMValue()
+            one^ = LLVMValue.ConstI64(1)
+            let next_idx = ir_builder_build_add(gen^.builder, current_idx, one)
+            ir_builder_build_store(gen^.builder, next_idx, idx_ptr, 8)
+            
+            ir_builder_build_br(gen^.builder, cond_lbl, "")
+            
+            ir_builder_start_block(gen^.builder, end_lbl)
+        }
+        LoadPointer(dest, ptr) -> {
+            let ptr_val = llvm_generator_operand_to_value(gen, ptr)
+            let loaded_val = ir_builder_build_load(gen^.builder, ptr_val, 0)
+            
+            when dest^ {
+                Variable(name) -> {
+                    mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, name)
+                    if ptr_opt != None {
+                        let ptr_wrap_val: LLVMValuePtr = ptr_opt
+                        mut ptr_wrap = alloc LLVMValuePtr()
+                        ptr_wrap^ = ptr_wrap_val
+                        ir_builder_build_store(gen^.builder, loaded_val, ptr_wrap^.ptr, 0)
+                    } else {
+                        mut vw = alloc LLVMValuePtr()
+                        vw^.ptr = loaded_val
+                        hashmap_put(gen^.function_params, name, vw^)
+                    }
+                }
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = loaded_val
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+        StorePointer(dest_ptr, source_val) -> {
+            let ptr_val = llvm_generator_operand_to_value(gen, dest_ptr)
+            let val_val = llvm_generator_operand_to_value(gen, source_val)
+            ir_builder_build_store(gen^.builder, val_val, ptr_val, 0)
+        }
+        Cast(dest, target_type, src) -> {
+            let src_val = llvm_generator_operand_to_value(gen, src)
+            let src_ty = llvm_value_get_type(src_val)
+            let dest_ty = llvm_generator_str_to_llvm_type(gen, target_type)
+            
+            mut casted_val = src_val
+            
+            when src_ty^ {
+                I64 -> {
+                    when dest_ty^ {
+                        Double -> {
+                            mut d_ty = alloc LLVMType()
+                            d_ty^ = LLVMType.Double
+                            casted_val = ir_builder_build_sitofp(gen^.builder, src_val, d_ty)
+                        }
+                        I1 -> {
+                            mut zero = alloc LLVMValue()
+                            zero^ = LLVMValue.ConstI64(0)
+                            casted_val = ir_builder_build_icmp(gen^.builder, "ne", src_val, zero)
+                        }
+                        I64 -> {}
+                        I1 -> {} I8 -> {} I32 -> {} Pointer(i) -> {} Void -> {} Array(s, i) -> {} Named(n) -> {}
+                    }
+                }
+                Double -> {
+                    when dest_ty^ {
+                        I64 -> {
+                            mut i_ty = alloc LLVMType()
+                            i_ty^ = LLVMType.I64
+                            casted_val = ir_builder_build_fptosi(gen^.builder, src_val, i_ty)
+                        }
+                        I1 -> {} I8 -> {} I32 -> {} Double -> {} Pointer(i) -> {} Void -> {} Array(s, i) -> {} Named(n) -> {}
+                    }
+                }
+                I1 -> {
+                    when dest_ty^ {
+                        I64 -> {
+                            mut i_ty = alloc LLVMType()
+                            i_ty^ = LLVMType.I64
+                            casted_val = ir_builder_build_zext(gen^.builder, src_val, i_ty)
+                        }
+                        I1 -> {} I8 -> {} I32 -> {} Double -> {} Pointer(i) -> {} Void -> {} Array(s, i) -> {} Named(n) -> {}
+                    }
+                }
+                I8 -> {} I32 -> {} Pointer(inner) -> {} Void -> {} Array(sz, inner_arr) -> {} Named(named_str) -> {}
+            }
+            
+            when dest^ {
+                TempReg(t) -> {
+                    mut vw = alloc LLVMValuePtr()
+                    vw^.ptr = casted_val
+                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                }
+                LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
+            }
+        }
+    }
+}
+
+fn llvm_generator_lower_function(mut gen: ^LLVMGenerator, func: ^IRFunction) {
+    let sanitized_name = string_replace(string_replace(string_replace(string_replace(func^.name, "(", "_"), ")", ""), ", ", "_"), "^", "Ptr")
+    
+    mut final_name = sanitized_name
+    if string_eq(func^.name, "main") {
+        final_name = "nera_main"
+    }
+    
+    let ret_ty = llvm_generator_return_type_str_to_llvm(gen, func^.return_type)
+    
+    mut dummy_param = alloc LLVMParam()
+    mut params = new_list(10, dummy_param)
+    
+    mut p_idx = 0
+    while p_idx < func^.params^.length {
+        let ir_param = list_get(func^.params, p_idx)
+        mut llvm_p = alloc LLVMParam()
+        
+        let is_scalar = (string_contains(ir_param.name, "soa_") == false) and (string_contains(ir_param.name, "_") == false)
+        if is_scalar {
+            llvm_p^.name = concat_strings("param_", ir_param.name)
+        } else {
+            llvm_p^.name = ir_param.name
+        }
+        
+        llvm_p^.ty = llvm_generator_return_type_str_to_llvm(gen, ir_param.ty)
+        list_push(params, llvm_p^)
+        
+        if is_scalar {
+            string_set_add(gen^.scalar_vars, ir_param.name)
+        }
+        p_idx = p_idx + 1
+    }
+    
+    ir_builder_declare(gen^.builder, "declare i8* @malloc(i64)")
+    ir_builder_declare(gen^.builder, "declare void @free(i8*)")
+    
+    if func^.is_extern {
+        mut sig = concat_strings("declare ", llvm_type_to_string(ret_ty))
+        sig = concat_strings(sig, concat_strings(" @", final_name))
+        sig = concat_strings(sig, "()")
+        ir_builder_declare(gen^.builder, sig)
+        return
+    }
+    
+    ir_builder_start_function(gen^.builder, final_name, ret_ty, params)
+    
+    mut b = 0
+    while b < func^.blocks^.length {
+        let block_val = list_get(func^.blocks, b)
+        mut block = alloc BasicBlock()
+        block^ = block_val
+        ir_builder_start_block(gen^.builder, block^.name)
+        
+        mut i = 0
+        while i < block^.instrs^.length {
+            let instr = list_get(block^.instrs, i)
+            mut instr_ptr = alloc IRInstruction()
+            instr_ptr^ = instr
+            llvm_generator_lower_instruction(gen, instr_ptr)
+            i = i + 1
+        }
+        
+        when block^.terminator {
+            Jump(tgt) -> { ir_builder_build_br(gen^.builder, tgt, "") }
+            Branch(cond, t_tgt, f_tgt) -> {
+                let cond_val = llvm_generator_operand_to_value(gen, cond)
+                ir_builder_build_cond_br(gen^.builder, cond_val, t_tgt, f_tgt, "")
+            }
+            Return(val_opt) -> {
+                if val_opt != None {
+                    let v: ^IROperand = val_opt
+                    let ret_val = llvm_generator_operand_to_value(gen, v)
+                    
+                    mut ret_val_ptr = alloc LLVMValue()
+                    ret_val_ptr^ = ret_val^
+                    
+                    mut wrapped_opt: ?^LLVMValue = None
+                    wrapped_opt = ret_val_ptr
+                    ir_builder_build_ret(gen^.builder, wrapped_opt)
+                } else {
+                    mut none_opt: ?^LLVMValue = None
+                    ir_builder_build_ret(gen^.builder, none_opt)
+                }
+            }
+            None -> { ir_builder_build_unreachable(gen^.builder) }
+        }
+        
+        b = b + 1
+    }
+    
+    ir_builder_end_function(gen^.builder)
+}
+
+fn llvm_generator_generate(mut gen: ^LLVMGenerator, opt_ir: ^OptimizedIR) -> String {
+    mut f = 0
+    while f < opt_ir^.functions^.length {
+        let func_val = list_get(opt_ir^.functions, f)
+        mut func_ptr = alloc IRFunction()
+        func_ptr^ = func_val
+        llvm_generator_lower_function(gen, func_ptr)
+        f = f + 1
+    }
+    
+    mut out = ""
+    out = concat_strings(out, "; ModuleID = 'nera_program'\n")
+    out = concat_strings(out, "target datalayout = \"e-m:e-i64:64-f80:128-n8:16:32:64-S128\"\n")
+    out = concat_strings(out, "target triple = \"x86_64-pc-linux-gnu\"\n\n")
+    
+    mut i = 0
+    while i < gen^.builder^.module^.declarations^.length {
+        let decl = list_get(gen^.builder^.module^.declarations, i)
+        out = concat_strings(out, concat_strings(decl, "\n"))
+        i = i + 1
+    }
+    out = concat_strings(out, "\n")
+    
+    mut j = 0
+    while j < gen^.builder^.module^.global_strings^.length {
+        let gs_val = list_get(gen^.builder^.module^.global_strings, j)
+        mut gs = alloc LLVMGlobalString()
+        gs^ = gs_val
+        out = concat_strings(out, concat_strings("@", gs^.name))
+        out = concat_strings(out, concat_strings(" = private unnamed_addr constant [", int_to_string(gs^.len)))
+        out = concat_strings(out, concat_strings(" x i8] c\"", gs^.val))
+        out = concat_strings(out, "\", align 1\n")
+        j = j + 1
+    }
+    out = concat_strings(out, "\n")
+    
+    mut k = 0
+    while k < gen^.builder^.module^.funcs^.length {
+        let func_val = list_get(gen^.builder^.module^.funcs, k)
+        mut func = alloc LLVMFunction()
+        func^ = func_val
+        out = concat_strings(out, concat_strings("define ", llvm_type_to_string(func^.ret_ty)))
+        out = concat_strings(out, concat_strings(" @", func^.name))
+        out = concat_strings(out, "() {\n")
+        
+        mut b = 0
+        while b < func^.blocks^.length {
+            let blk_val = list_get(func^.blocks, b)
+            mut blk = alloc LLVMBasicBlock()
+            blk^ = blk_val
+            out = concat_strings(out, concat_strings(blk^.name, ":\n"))
+            if b == 0 {
+                mut a = 0
+                while a < func^.allocas^.length {
+                    let alloca_instr = list_get(func^.allocas, a)
+                    mut instr_ptr = alloc LLVMInstruction()
+                    instr_ptr^ = alloca_instr
+                    out = concat_strings(out, concat_strings(llvm_instr_to_string(instr_ptr), "\n"))
+                    a = a + 1
+                }
+            }
+            mut instr_idx = 0
+            while instr_idx < blk^.instrs^.length {
+                let instr = list_get(blk^.instrs, instr_idx)
+                mut instr_ptr = alloc LLVMInstruction()
+                instr_ptr^ = instr
+                out = concat_strings(out, concat_strings(llvm_instr_to_string(instr_ptr), "\n"))
+                instr_idx = instr_idx + 1
+            }
+            b = b + 1
+        }
+        out = concat_strings(out, "}\n\n")
+        k = k + 1
+    }
+    
+    return out
+}

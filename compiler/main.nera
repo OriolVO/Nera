@@ -1,0 +1,400 @@
+// compiler/main.nera
+use compiler.error
+use compiler.frontend.lexer
+use compiler.frontend.ast
+use compiler.frontend.parser
+use compiler.frontend.sema.analyzer
+use compiler.frontend.sema.types
+use compiler.frontend.sema.env
+use compiler.midend.ir
+use compiler.midend.ir_gen
+use compiler.midend.optimizer
+use compiler.backend.llvm_ir
+use compiler.backend.llvm_gen
+use std.collections
+use std.fs
+use std.env
+
+
+data StringList {
+    list: ^List(String)
+}
+
+data ProgramMapEntry {
+    key: String
+    value: Program
+}
+data ProgramMap {
+    entries: ^List(ProgramMapEntry)
+}
+fn program_map_put(map: ^ProgramMap, key: String, value: Program) {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            mut updated = alloc ProgramMapEntry()
+            updated^.key = key
+            updated^.value = value
+            list_set(map^.entries, i, updated^)
+            return
+        }
+        i = i + 1
+    }
+    mut new_entry = alloc ProgramMapEntry()
+    new_entry^.key = key
+    new_entry^.value = value
+    list_push(map^.entries, new_entry^)
+}
+fn program_map_get(map: ^ProgramMap, key: String) -> ?Program {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) {
+            mut ret: ?Program = None
+            ret = entry.value
+            return ret
+        }
+        i = i + 1
+    }
+    mut ret: ?Program = None
+    return ret
+}
+fn program_map_contains(map: ^ProgramMap, key: String) -> Boolean {
+    mut i = 0
+    while i < map^.entries^.length {
+        let entry = list_get(map^.entries, i)
+        if string_eq(entry.key, key) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+
+fn print_usage() {
+    puts("Nera Compiler")
+    puts("Usage:")
+    puts("  nera compile <file.nera>   Compile to LLVM IR (.ll)")
+    puts("  nera run <file.nera>       Compile and execute")
+}
+
+fn post_order_collect(
+    file: String,
+    deps: ^StringListMap,
+    parsed: ^ProgramMap,
+    visited: ^StringSet,
+    all_decls: ^List(^Spanned(Declaration))
+) {
+    if string_set_contains(visited, file) {
+        return
+    }
+    string_set_add(visited, file)
+    
+    mut file_deps_opt: ?^List(String) = string_list_map_get(deps, file)
+    if file_deps_opt != None {
+        let file_deps: ^List(String) = file_deps_opt
+        mut i = 0
+        while i < file_deps^.length {
+            let dep = list_get(file_deps, i)
+            post_order_collect(dep, deps, parsed, visited, all_decls)
+            i = i + 1
+        }
+    }
+    
+    mut prog_opt: ?Program = program_map_get(parsed, file)
+    if prog_opt != None {
+        mut prog: Program = prog_opt
+        mut i = 0
+        while i < prog.declarations^.length {
+            let d = list_get(prog.declarations, i)
+            list_push(all_decls, d)
+            i = i + 1
+        }
+    }
+}
+
+fn run_compiler(command: String, filename: String, program_args: ^List(String)) -> ?^CompileError {
+    let source = read_file_to_string(filename)
+    if string_eq(source, "") {
+        mut err = alloc CompileError()
+        err^ = CompileError.IoError("Failed to read main file")
+        mut ret: ?^CompileError = None
+        ret = err
+        return ret
+    }
+
+    mut dummy_str = alloc String()
+    dummy_str^ = ""
+    mut pending = new_list(16, dummy_str)
+    list_push(pending, filename)
+
+    mut dummy_prog_entry = alloc ProgramMapEntry()
+    mut parsed_programs = alloc ProgramMap()
+    parsed_programs^.entries = new_list(16, dummy_prog_entry)
+    
+    mut dummy_slme = alloc StringListMapEntry()
+    mut deps = alloc StringListMap()
+    deps^.entries = new_list(16, dummy_slme)
+
+    while pending^.length > 0 {
+        let current_file = list_get(pending, pending^.length - 1)
+        pending^.length = pending^.length - 1
+        
+        let has_prog = program_map_contains(parsed_programs, current_file)
+        if has_prog {
+            continue
+        }
+
+        let contents = read_file_to_string(current_file)
+        if string_eq(contents, "") {
+            puts(concat_strings("WARNING: Failed to load file ", current_file))
+            continue
+        }
+
+        puts(concat_strings("--- TOKENS FOR: ", current_file))
+        mut dbg_lex = alloc_lexer(contents)
+        mut dbg_tok = next_token(dbg_lex)
+        while not check_token(dbg_tok^.kind, "Eof") {
+            print_token(dbg_tok)
+            dbg_tok = next_token(dbg_lex)
+        }
+        puts("--- END TOKENS ---")
+
+        puts(concat_strings("contents BEFORE second lexer: ", contents))
+        let lexer = alloc_lexer(contents)
+        puts(concat_strings("lexer^.source is: ", lexer^.source))
+        mut parser = alloc_parser(lexer)
+        mut program = parse_program(parser)
+        
+        puts(concat_strings("Imports length: ", int_to_string(program^.imports^.length)))
+        
+        mut file_deps = new_list(4, dummy_str)
+        
+        mut i = 0
+        while i < program^.imports^.length {
+            let import_span = list_get(program^.imports, i)
+            let path_parts = import_span^.node.path
+            
+            mut path_str = ""
+            mut j = 0
+            while j < path_parts^.length {
+                let part = list_get(path_parts, j)
+                if j > 0 {
+                    path_str = concat_strings(path_str, "/")
+                }
+                path_str = concat_strings(path_str, part)
+                j = j + 1
+            }
+            let dep_filename = concat_strings(path_str, ".nera")
+            list_push(pending, dep_filename)
+            list_push(file_deps, dep_filename)
+            i = i + 1
+        }
+        
+        program_map_put(parsed_programs, current_file, program^)
+        string_list_map_put(deps, current_file, file_deps)
+    }
+
+    mut visited_post = new_string_set()
+    mut dummy_decl = alloc ^Spanned(Declaration)()
+    mut all_declarations = new_list(128, dummy_decl)
+    
+    post_order_collect(filename, deps, parsed_programs, visited_post, all_declarations)
+    
+    mut master_program = alloc Program()
+    mut dummy_imp = alloc ^Spanned(ImportDirective)()
+    master_program^.imports = new_list(0, dummy_imp)
+    master_program^.declarations = all_declarations
+    
+    mut analyzer = analyzer_new()
+    analyze_program(analyzer, master_program)
+    if analyzer^.diagnostics^.length > 0 {
+        mut err = alloc CompileError()
+        err^ = CompileError.SemanticError(analyzer^.diagnostics)
+        mut ret: ?^CompileError = None
+        ret = err
+        return ret
+    }
+    let type_env = analyzer^.env
+    
+    mut ir_gen = ir_gen_new()
+    ir_generate(ir_gen, master_program)
+    
+    mut optimizer = ir_optimizer_new()
+    let opt_ir = optimizer_optimize(optimizer, ir_gen^.functions, ir_gen^.global_instructions)
+    
+    mut llvm_gen = llvm_generator_new()
+    let llvm_text = llvm_generator_generate(llvm_gen, opt_ir)
+    
+    let base_name = string_replace(filename, ".nera", "")
+    let ll_filename = concat_strings(base_name, ".ll")
+    let write_ok = write_file(ll_filename, llvm_text)
+    if not write_ok {
+        mut err = alloc CompileError()
+        err^ = CompileError.IoError("Failed to write .ll file")
+        mut ret: ?^CompileError = None
+        ret = err
+        return ret
+    }
+    
+    if string_eq(command, "run") {
+        let bin_filename = base_name
+        
+        let verify_cmd = concat_strings(concat_strings("llc -verify-machineinstrs ", ll_filename), " -o /dev/null")
+        let verify_status = system(verify_cmd)
+        if verify_status != 0 {
+            let dummy = remove_file(ll_filename)
+            mut err = alloc CompileError()
+            err^ = CompileError.BackendError("LLVM IR Verification failed.")
+            mut ret: ?^CompileError = None
+            ret = err
+            return ret
+        }
+        
+        let clang_cmd = concat_strings(concat_strings(concat_strings(concat_strings("clang -O3 -march=native -ffast-math ", ll_filename), " src/runtime.c -o "), bin_filename), " -lm")
+        let clang_status = system(clang_cmd)
+        if clang_status != 0 {
+            let dummy = remove_file(ll_filename)
+            mut err = alloc CompileError()
+            err^ = CompileError.BackendError("Clang backend compilation failed.")
+            mut ret: ?^CompileError = None
+            ret = err
+            return ret
+        }
+        
+        let dummy2 = remove_file(ll_filename)
+        
+        mut run_cmd = concat_strings("./", bin_filename)
+        mut arg_i = 0
+        while arg_i < program_args^.length {
+            let arg = list_get(program_args, arg_i)
+            let prev_cmd = run_cmd
+            let arg_with_space = concat_strings(" ", arg)
+            run_cmd = concat_strings(prev_cmd, arg_with_space)
+            free_string(prev_cmd)
+            free_string(arg_with_space)
+            arg_i = arg_i + 1
+        }
+        let run_status = system(run_cmd)
+        free_string(run_cmd)
+        if run_status != 0 {
+            mut err = alloc CompileError()
+            err^ = CompileError.BackendError(concat_strings("Program exited with error code ", int_to_string(run_status)))
+            mut ret: ?^CompileError = None
+            ret = err
+            return ret
+        }
+    }
+    
+    mut success: ?^CompileError = None
+    return success
+}
+
+fn nera_main() -> Int {
+    let argc = get_arg_count()
+    if argc < 3 {
+        print_usage()
+        return 1
+    }
+    
+    let command = get_arg(1)
+    let filename = get_arg(2)
+    
+    if not string_eq(command, "compile") and not string_eq(command, "run") {
+        puts(concat_strings("Unknown command: ", command))
+        return 1
+    }
+    
+    mut dummy_str = alloc String()
+    dummy_str^ = ""
+    mut prog_args = new_list(0, dummy_str)
+    mut i = 3
+    while i < argc {
+        list_push(prog_args, get_arg(i))
+        i = i + 1
+    }
+    let result = run_compiler(command, filename, prog_args)
+    if result != None {
+        let err: ^CompileError = result
+        puts("Compilation failed:")
+        puts(compile_error_to_string(err))
+        return 1
+    }
+    
+    if string_eq(command, "compile") {
+        puts("Successfully compiled.")
+    }
+    
+    return 0
+}
+
+fn print_token(tok: ^Token) {
+    let kind = tok^.kind
+    when kind {
+        Identifier(name) -> { puts(concat_strings("Identifier: ", name)) }
+        Integer(val) -> { puts("Integer") }
+        Float(val) -> { puts("Float") }
+        StringLiteral(val) -> { puts("StringLiteral") }
+        CharLiteral(val) -> { puts("CharLiteral") }
+        Error(msg) -> { puts(concat_strings("Error token: ", msg)) }
+        Data -> { puts("Data") }
+        Fn -> { puts("Fn") }
+        Let -> { puts("Let") }
+        Mut -> { puts("Mut") }
+        If -> { puts("If") }
+        Else -> { puts("Else") }
+        While -> { puts("While") }
+        Return -> { puts("Return") }
+        When -> { puts("When") }
+        Break -> { puts("Break") }
+        Continue -> { puts("Continue") }
+        Use -> { puts("Use") }
+        Extern -> { puts("Extern") }
+        True -> { puts("True") }
+        False -> { puts("False") }
+        Choice -> { puts("Choice") }
+        And -> { puts("And") }
+        Or -> { puts("Or") }
+        Not -> { puts("Not") }
+        BitAnd -> { puts("BitAnd") }
+        BitOr -> { puts("BitOr") }
+        BitXor -> { puts("BitXor") }
+        Shl -> { puts("Shl") }
+        Shr -> { puts("Shr") }
+        As -> { puts("As") }
+        Assign -> { puts("Assign") }
+        AddAssign -> { puts("AddAssign") }
+        SubAssign -> { puts("SubAssign") }
+        MulAssign -> { puts("MulAssign") }
+        DivAssign -> { puts("DivAssign") }
+        Eq -> { puts("Eq") }
+        NotEq -> { puts("NotEq") }
+        Lt -> { puts("Lt") }
+        LtEq -> { puts("LtEq") }
+        Gt -> { puts("Gt") }
+        GtEq -> { puts("GtEq") }
+        Add -> { puts("Add") }
+        Sub -> { puts("Sub") }
+        Mul -> { puts("Mul") }
+        Div -> { puts("Div") }
+        Mod -> { puts("Mod") }
+        Pipe -> { puts("Pipe") }
+        Arrow -> { puts("Arrow") }
+        Caret -> { puts("Caret") }
+        Alloc -> { puts("Alloc") }
+        Free -> { puts("Free") }
+        Question -> { puts("Question") }
+        NoneLiteral -> { puts("NoneLiteral") }
+        LBrace -> { puts("LBrace") }
+        RBrace -> { puts("RBrace") }
+        LBracket -> { puts("LBracket") }
+        RBracket -> { puts("RBracket") }
+        LParen -> { puts("LParen") }
+        RParen -> { puts("RParen") }
+        Colon -> { puts("Colon") }
+        Comma -> { puts("Comma") }
+        Dot -> { puts("Dot") }
+        DotDot -> { puts("DotDot") }
+        Eof -> { puts("Eof") }
+    }
+}
+

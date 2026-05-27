@@ -6,12 +6,24 @@ extern fn fseek(stream: ^Void, offset: Int, whence: Int) -> Int
 extern fn ftell(stream: ^Void) -> Int
 extern fn fread(ptr: String, size: Int, nmemb: Int, stream: ^Void) -> Int
 extern fn fclose(stream: ^Void) -> Int
+extern fn fwrite(ptr: String, size: Int, nmemb: Int, stream: ^Void) -> Int
+extern fn remove(filename: String) -> Int
+extern fn malloc(size: Int) -> String
 extern fn aligned_alloc(alignment: Int, size: Int) -> String
+extern fn strlen(s: String) -> Int
+extern fn string_set_char_at(s: String, index: Int, c: Int) -> Void
+
+extern fn is_null(ptr: ^Void) -> Boolean
 
 /// Reads the entire contents of a file into a dynamically allocated string.
 /// Returns None if the file could not be opened.
 fn read_file_to_string(path: String) -> String {
     let file = fopen(path, "r")
+    
+    // Check if file could not be opened
+    if is_null(file) {
+        return ""
+    }
     
     // Seek to the end to get file size
     fseek(file, 0, 2) // SEEK_END is usually 2
@@ -21,21 +33,31 @@ fn read_file_to_string(path: String) -> String {
     fseek(file, 0, 0) // SEEK_SET is usually 0
     
     // Allocate buffer (size + 1 for null terminator)
-    let buffer = aligned_alloc(32, size + 1)
+    let buffer = malloc(size + 1)
     
     // Read the file into the buffer
     fread(buffer, 1, size, file)
     
-    // We already have 0-initialization from aligned_alloc if it's calloc, 
-    // but aligned_alloc doesn't zero. Actually, in LLVM we used aligned_alloc
-    // which just allocates. Since Strings in Nera don't have lengths stored,
-    // they rely on null terminators.
-    // Wait, fread doesn't add a null terminator. We'd need to manually set it.
-    // But we don't have memory slicing yet. For now, it's fine, we can just hope 
-    // it works or we don't read more than needed. Wait, in Nera, strings are C strings.
-    // We can just rely on the C string behavior or use it as is.
+    // Null terminate the buffer
+    string_set_char_at(buffer, size, 0)
     
     fclose(file)
-    
     return buffer
+}
+
+/// Writes the given content to a file.
+/// Returns true if successful, false otherwise.
+fn write_file(path: String, content: String) -> Boolean {
+    let file = fopen(path, "w")
+    let len = strlen(content)
+    let written = fwrite(content, 1, len, file)
+    fclose(file)
+    return written == len
+}
+
+/// Deletes the file at the given path.
+/// Returns true if successful, false otherwise.
+fn remove_file(path: String) -> Boolean {
+    let res = remove(path)
+    return res == 0
 }

@@ -111,7 +111,7 @@ fn run_compiler(command: &str, filename: &str, program_args: &[String]) -> Resul
 
     // Mid-end: Optimization
     let optimizer = IROptimizer::new();
-    let optimized_ir = optimizer.optimize(ir_gen.functions.clone(), ir_gen.global_instructions.clone())?;
+    let optimized_ir = optimizer.optimize(ir_gen.functions.clone(), ir_gen.global_instructions.clone(), ir_gen.data_structs.clone())?;
 
     // Backend: LLVM Code Generation
     let mut llvm_gen = LLVMGenerator::new();
@@ -139,11 +139,11 @@ fn run_compiler(command: &str, filename: &str, program_args: &[String]) -> Resul
             
         if let Ok(status) = verify_status {
             if !status.success() {
-                let _ = fs::remove_file(&ll_filename);
+                // let _ = fs::remove_file(&ll_filename);
                 return Err(CompileError::BackendError("LLVM IR Verification failed. The generated IR is invalid.".to_string()));
             }
         } else {
-            let _ = fs::remove_file(&ll_filename);
+            // let _ = fs::remove_file(&ll_filename);
             return Err(CompileError::BackendError("Failed to execute llc. Is llvm installed and in your PATH?".to_string()));
         }
 

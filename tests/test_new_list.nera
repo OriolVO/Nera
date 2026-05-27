@@ -1,0 +1,5 @@
+use std.collections
+fn main() {
+    mut x = alloc ^String()
+    let y: ^List(^String) = new_list(2, x)
+}

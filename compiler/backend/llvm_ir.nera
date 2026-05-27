@@ -1,0 +1,287 @@
+// compiler/backend/llvm_ir.nera
+use std.collections
+use std.string
+
+extern fn float_to_string(val: Float) -> String
+extern fn bool_to_string(val: Boolean) -> String
+
+// Funcions auxiliars per concatenar cadenes còmodament
+fn concat3(s1: String, s2: String, s3: String) -> String {
+    return concat_strings(s1, concat_strings(s2, s3))
+}
+fn concat4(s1: String, s2: String, s3: String, s4: String) -> String {
+    return concat_strings(concat_strings(s1, s2), concat_strings(s3, s4))
+}
+fn concat5(s1: String, s2: String, s3: String, s4: String, s5: String) -> String {
+    return concat_strings(concat4(s1, s2, s3, s4), s5)
+}
+fn concat6(s1: String, s2: String, s3: String, s4: String, s5: String, s6: String) -> String {
+    return concat_strings(concat5(s1, s2, s3, s4, s5), s6)
+}
+fn concat7(s1: String, s2: String, s3: String, s4: String, s5: String, s6: String, s7: String) -> String {
+    return concat_strings(concat6(s1, s2, s3, s4, s5, s6), s7)
+}
+
+fn concat8(s1: String, s2: String, s3: String, s4: String, s5: String, s6: String, s7: String, s8: String) -> String {
+    return concat_strings(concat7(s1, s2, s3, s4, s5, s6, s7), s8)
+}
+
+choice LLVMType {
+    I1,
+    I8,
+    I32,
+    I64,
+    Double,
+    Pointer(^LLVMType),
+    Void,
+    Array(Int, ^LLVMType),
+    Named(String)
+}
+
+fn llvm_type_to_string(ty: ^LLVMType) -> String {
+    when ty^ {
+        I1 -> { return "i1" }
+        I8 -> { return "i8" }
+        I32 -> { return "i32" }
+        I64 -> { return "i64" }
+        Double -> { return "double" }
+        Pointer(inner) -> { return concat_strings(llvm_type_to_string(inner), "*") }
+        Void -> { return "void" }
+        Array(size, inner) -> { return concat5("[", int_to_string(size), " x ", llvm_type_to_string(inner), "]") }
+        Named(name) -> { return concat_strings("%", name) }
+    }
+    return ""
+}
+
+choice LLVMValue {
+    Reg(String, ^LLVMType),
+    Global(String, ^LLVMType),
+    ConstGlobalStringPtr(String, Int),
+    ConstI1(Boolean),
+    ConstI8(Int),
+    ConstI32(Int),
+    ConstI64(Int),
+    ConstDouble(Float),
+    Null(^LLVMType)
+}
+
+fn llvm_value_get_type(val: ^LLVMValue) -> ^LLVMType {
+    mut ret = alloc LLVMType()
+    when val^ {
+        Reg(n_reg, t_reg) -> { ret^ = t_reg^ }
+        Global(n_glob, t_glob) -> { ret^ = t_glob^ }
+        ConstI1(v_b) -> { ret^ = LLVMType.I1 }
+        ConstI8(v_8) -> { ret^ = LLVMType.I8 }
+        ConstI32(v_32) -> { ret^ = LLVMType.I32 }
+        ConstI64(v_64) -> { ret^ = LLVMType.I64 }
+        ConstDouble(v_f) -> { ret^ = LLVMType.Double }
+        Null(t_null) -> { ret^ = t_null^ }
+        ConstGlobalStringPtr(n_str, l_str) -> { 
+            mut inner = alloc LLVMType()
+            inner^ = LLVMType.I8
+            ret^ = LLVMType.Pointer(inner) 
+        }
+    }
+    return ret
+}
+
+fn llvm_value_to_string(val: ^LLVMValue) -> String {
+    when val^ {
+        Reg(n_reg, t_reg) -> { return concat_strings("%", n_reg) }
+        Global(n_glob, t_glob) -> { return concat_strings("@", n_glob) }
+        ConstI1(v_b) -> { if v_b { return "1" } else { return "0" } }
+        ConstI8(v_8) -> { return int_to_string(v_8) }
+        ConstI32(v_32) -> { return int_to_string(v_32) }
+        ConstI64(v_64) -> { return int_to_string(v_64) }
+        ConstDouble(v_f) -> { return float_to_string(v_f) }
+        Null(t_null) -> {
+            when t_null^ {
+                Pointer(i_ptr) -> { return "null" }
+                Double -> { return "0.0" }
+                I1 -> { return "0" } I8 -> { return "0" } I32 -> { return "0" } I64 -> { return "0" } Array(s_arr, i_arr) -> { return "0" } Named(n_named) -> { return "0" } Void -> { return "0" }
+            }
+        }
+        ConstGlobalStringPtr(n_str, l_str) -> { 
+            let len_str = int_to_string(l_str)
+            return concat7("getelementptr inbounds ([", len_str, " x i8], [", len_str, " x i8]* @", n_str, ", i64 0, i64 0)") 
+        }
+    }
+    return ""
+}
+
+fn llvm_value_typed_string(val: ^LLVMValue) -> String {
+    let ty_str = llvm_type_to_string(llvm_value_get_type(val))
+    let val_str = llvm_value_to_string(val)
+    return concat3(ty_str, " ", val_str)
+}
+
+choice LLVMInstruction {
+    Alloca(String, ^LLVMType),
+    Load(String, ^LLVMType, ^LLVMValue, Int), // align: 0 = none
+    Store(^LLVMValue, ^LLVMValue, Int),
+    GetElementPtr(String, ^LLVMType, ^LLVMValue, ^List(LLVMValue)),
+    Add(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    FAdd(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    Sub(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    FSub(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    Mul(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    FMul(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    SDiv(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    SRem(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    FDiv(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    ICmp(String, String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    FCmp(String, String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    And(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    Or(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    Xor(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    Shl(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    AShr(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
+    ZExt(String, ^LLVMType, ^LLVMValue, ^LLVMType),
+    Trunc(String, ^LLVMType, ^LLVMValue, ^LLVMType),
+    SIToFP(String, ^LLVMType, ^LLVMValue, ^LLVMType),
+    FPToSI(String, ^LLVMType, ^LLVMValue, ^LLVMType),
+    BitCast(String, ^LLVMType, ^LLVMValue, ^LLVMType),
+    IntToPtr(String, ^LLVMType, ^LLVMValue, ^LLVMType),
+    PtrToInt(String, ^LLVMType, ^LLVMValue, ^LLVMType),
+    // Phi omès de moment (poc utilitzat nativament pel builder excepte a vector_apply, requereix estructures complexes)
+    Call(?String, ^LLVMType, String, ^List(LLVMValue)),
+    Br(String, String), // target, meta (buit si cap)
+    CondBr(^LLVMValue, String, String, String),
+    Ret(?^LLVMValue),
+    Unreachable
+}
+
+fn llvm_instr_to_string(instr: ^LLVMInstruction) -> String {
+    when instr^ {
+        Alloca(dest, ty) -> { return concat4("  %", dest, " = alloca ", llvm_type_to_string(ty)) }
+        Load(dest, ty, ptr, align) -> {
+            mut s = concat5("  %", dest, " = load ", llvm_type_to_string(ty), ", ")
+            s = concat_strings(s, llvm_value_typed_string(ptr))
+            if align > 0 { s = concat3(s, ", align ", int_to_string(align)) }
+            return s
+        }
+        Store(val, ptr, align) -> {
+            mut s = concat4("  store ", llvm_value_typed_string(val), ", ", llvm_value_typed_string(ptr))
+            if align > 0 { s = concat3(s, ", align ", int_to_string(align)) }
+            return s
+        }
+        GetElementPtr(dest, base_ty, ptr, indices) -> {
+            mut s = concat6("  %", dest, " = getelementptr inbounds ", llvm_type_to_string(base_ty), ", ", llvm_value_typed_string(ptr))
+            mut i = 0
+            while i < indices^.length {
+                let idx = list_get(indices, i)
+                mut idx_ptr = alloc LLVMValue()
+                idx_ptr^ = idx
+                s = concat3(s, ", ", llvm_value_typed_string(idx_ptr))
+                i = i + 1
+            }
+            return s
+        }
+        Add(d, t, l, r) -> { return concat8("  %", d, " = add nsw ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        FAdd(d, t, l, r) -> { return concat8("  %", d, " = fadd ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        Sub(d, t, l, r) -> { return concat8("  %", d, " = sub nsw ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        FSub(d, t, l, r) -> { return concat8("  %", d, " = fsub ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        Mul(d, t, l, r) -> { return concat8("  %", d, " = mul nsw ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        FMul(d, t, l, r) -> { return concat8("  %", d, " = fmul ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        SDiv(d, t, l, r) -> { return concat8("  %", d, " = sdiv ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        SRem(d, t, l, r) -> { return concat8("  %", d, " = srem ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        FDiv(d, t, l, r) -> { return concat8("  %", d, " = fdiv ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        ICmp(d, pred, t, l, r) -> { return concat7(concat3("  %", d, " = icmp "), pred, " ", llvm_type_to_string(t), " ", llvm_value_to_string(l), concat_strings(", ", llvm_value_to_string(r))) }
+        FCmp(d, pred, t, l, r) -> { return concat7(concat3("  %", d, " = fcmp "), pred, " ", llvm_type_to_string(t), " ", llvm_value_to_string(l), concat_strings(", ", llvm_value_to_string(r))) }
+        And(d, t, l, r) -> { return concat8("  %", d, " = and ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        Or(d, t, l, r) -> { return concat8("  %", d, " = or ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        Xor(d, t, l, r) -> { return concat8("  %", d, " = xor ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        Shl(d, t, l, r) -> { return concat8("  %", d, " = shl ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        AShr(d, t, l, r) -> { return concat8("  %", d, " = ashr ", llvm_type_to_string(t), " ", llvm_value_to_string(l), ", ", llvm_value_to_string(r)) }
+        ZExt(d, dest_ty, v, src_ty) -> { return concat6("  %", d, " = zext ", llvm_value_typed_string(v), " to ", llvm_type_to_string(dest_ty)) }
+        Trunc(d, dest_ty, v, src_ty) -> { return concat6("  %", d, " = trunc ", llvm_value_typed_string(v), " to ", llvm_type_to_string(dest_ty)) }
+        SIToFP(d, dest_ty, v, src_ty) -> { return concat6("  %", d, " = sitofp ", llvm_value_typed_string(v), " to ", llvm_type_to_string(dest_ty)) }
+        FPToSI(d, dest_ty, v, src_ty) -> { return concat6("  %", d, " = fptosi ", llvm_value_typed_string(v), " to ", llvm_type_to_string(dest_ty)) }
+        BitCast(d, dest_ty, v, src_ty) -> { return concat6("  %", d, " = bitcast ", llvm_value_typed_string(v), " to ", llvm_type_to_string(dest_ty)) }
+        IntToPtr(d, dest_ty, v, src_ty) -> { return concat6("  %", d, " = inttoptr ", llvm_value_typed_string(v), " to ", llvm_type_to_string(dest_ty)) }
+        PtrToInt(d, dest_ty, v, src_ty) -> { return concat6("  %", d, " = ptrtoint ", llvm_value_typed_string(v), " to ", llvm_type_to_string(dest_ty)) }
+        
+        Call(dest_opt, ret_ty, name, args) -> {
+            mut s = ""
+            if dest_opt != None {
+                let d: String = dest_opt
+                s = concat5("  %", d, " = call ", llvm_type_to_string(ret_ty), " @")
+            } else {
+                s = concat3("  call ", llvm_type_to_string(ret_ty), " @")
+            }
+            s = concat3(s, name, "(")
+            
+            mut i = 0
+            while i < args^.length {
+                let a = list_get(args, i)
+                mut a_ptr = alloc LLVMValue()
+                a_ptr^ = a
+                s = concat_strings(s, llvm_value_typed_string(a_ptr))
+                if i < args^.length - 1 {
+                    s = concat_strings(s, ", ")
+                }
+                i = i + 1
+            }
+            return concat_strings(s, ")")
+        }
+        Br(lbl, meta) -> {
+            mut s = concat_strings("  br label %", lbl)
+            if not string_eq(meta, "") { s = concat3(s, ", ", meta) }
+            return s
+        }
+        CondBr(cond, t_lbl, f_lbl, meta) -> {
+            mut s = concat5("  br i1 ", llvm_value_to_string(cond), ", label %", t_lbl, ", label %")
+            s = concat_strings(s, f_lbl)
+            if not string_eq(meta, "") { s = concat3(s, ", ", meta) }
+            return s
+        }
+        Ret(val_opt) -> {
+            if val_opt != None {
+                let v: ^LLVMValue = val_opt
+                return concat_strings("  ret ", llvm_value_typed_string(v))
+            } else {
+                return "  ret void"
+            }
+        }
+        Unreachable -> { return "  unreachable" }
+    }
+    return ""
+}
+
+data LLVMBasicBlock {
+    name: String
+    instrs: ^List(LLVMInstruction)
+}
+
+data LLVMParam {
+    name: String
+    ty: ^LLVMType
+}
+
+data LLVMFunction {
+    name: String
+    ret_ty: ^LLVMType
+    params: ^List(LLVMParam)
+    blocks: ^List(LLVMBasicBlock)
+    allocas: ^List(LLVMInstruction)
+}
+
+data LLVMGlobalString {
+    name: String
+    val: String
+    len: Int
+}
+
+data LLVMModule {
+    name: String
+    funcs: ^List(LLVMFunction)
+    declarations: ^List(String)
+    global_strings: ^List(LLVMGlobalString)
+}
+
+data IRBuilder {
+    module: ^LLVMModule
+    active_func: ?^LLVMFunction
+    active_block: ?^LLVMBasicBlock
+    reg_count: Int
+}

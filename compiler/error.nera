@@ -1,0 +1,20 @@
+// compiler/error.nera
+use compiler.frontend.diagnostics
+use std.string
+
+choice CompileError {
+    IoError(String),
+    SyntaxError(^List(DiagnosticError)),
+    SemanticError(^List(DiagnosticError)),
+    BackendError(String)
+}
+
+fn compile_error_to_string(err: ^CompileError) -> String {
+    when err^ {
+        IoError(msg) -> { return concat_strings("IO Error: ", msg) }
+        SyntaxError(errs) -> { return "Syntax Error (see diagnostics)" }
+        SemanticError(errs) -> { return "Semantic Error (see diagnostics)" }
+        BackendError(msg) -> { return concat_strings("Backend Error: ", msg) }
+    }
+    return ""
+}

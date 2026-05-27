@@ -3,8 +3,8 @@ use std.collections
 use compiler.frontend.diagnostics
 
 data Program {
-    imports: ^List(Spanned(ImportDirective))
-    declarations: ^List(Spanned(Declaration))
+    imports: ^List(^Spanned(ImportDirective))
+    declarations: ^List(^Spanned(Declaration))
 }
 
 data ImportDirective {
@@ -23,7 +23,7 @@ choice Declaration {
 data DataDecl {
     name: String
     generic_params: ^List(String)
-    fields: ^List(FieldDecl)
+    fields: ^List(^FieldDecl)
 }
 
 data FieldDecl {
@@ -34,18 +34,18 @@ data FieldDecl {
 data ChoiceDecl {
     name: String
     generic_params: ^List(String)
-    variants: ^List(VariantDecl)
+    variants: ^List(^VariantDecl)
 }
 
 data VariantDecl {
     name: String
-    associated_types: ^List(Spanned(Type))
+    associated_types: ^List(^Spanned(Type))
 }
 
 data FnDecl {
     name: String
     generic_params: ^List(String)
-    params: ^List(Param)
+    params: ^List(^Param)
     // Optional types can use a nullable pointer ?^Spanned(Type)
     return_type: ?^Spanned(Type)
     body: ^Spanned(Block)
@@ -54,7 +54,7 @@ data FnDecl {
 data ExternDecl {
     name: String
     generic_params: ^List(String)
-    params: ^List(Param)
+    params: ^List(^Param)
     return_type: ?^Spanned(Type)
 }
 
@@ -66,7 +66,7 @@ data Param {
 
 data Type {
     name: String
-    generic_args: ^List(Spanned(Type))
+    generic_args: ^List(^Spanned(Type))
     is_array: Boolean
     // Array size (0 for dynamic)
     array_size: Int
@@ -75,7 +75,7 @@ data Type {
 }
 
 data Block {
-    statements: ^List(Spanned(Statement))
+    statements: ^List(^Spanned(Statement))
 }
 
 choice Statement {
@@ -154,12 +154,12 @@ data CastExpr {
 
 data AllocExpr {
     ty: ^Spanned(Type)
-    arguments: ^List(Spanned(Expression))
+    arguments: ^List(^Spanned(Expression))
 }
 
 data WhenExpr {
     target: ^Spanned(Expression)
-    cases: ^List(WhenCase)
+    cases: ^List(^WhenCase)
     is_nullable: Boolean
 }
 
@@ -203,14 +203,14 @@ choice PrimaryExpr {
     StringLiteral(String),
     CharLiteral(Char),
     Boolean(Boolean),
-    ListLiteral(^List(Spanned(Expression))),
+    ListLiteral(^List(^Spanned(Expression))),
     NoneLiteral,
     Grouped(^Spanned(Expression))
 }
 
 data FunctionCall {
     callee: ^Spanned(Expression)
-    arguments: ^List(Spanned(Expression))
+    arguments: ^List(^Spanned(Expression))
 }
 
 data PropertyAccess {
@@ -238,7 +238,7 @@ data IndexExpr {
 data VariantConstructExpr {
     choice_name: String
     variant_name: String
-    arguments: ^List(Spanned(Expression))
+    arguments: ^List(^Spanned(Expression))
 }
 
 data StringIndexExpr {

@@ -7,6 +7,15 @@ data Parser {
     lex: ^Lexer
     current_token: ^Token
     next_token: ^Token
+    is_lookahead: Boolean
+}
+
+data ParserState {
+    pos: Int
+    line: Int
+    col: Int
+    current_token: ^Token
+    next_token: ^Token
 }
 
 fn alloc_parser(lex: ^Lexer) -> ^Parser {
@@ -14,25 +23,49 @@ fn alloc_parser(lex: ^Lexer) -> ^Parser {
     p^.lex = lex
     p^.current_token = next_token(lex)
     p^.next_token = next_token(lex)
+    p^.is_lookahead = false
     return p
 }
 
 fn advance_parser(mut p: ^Parser) -> Void {
+    if not p^.is_lookahead {
+        print_token(p^.current_token)
+    }
     p^.current_token = p^.next_token
     p^.next_token = next_token(p^.lex)
 }
 
 fn report_error(p: ^Parser, span: ^Span, msg: String) -> Void {
-    print_diagnostic(p^.lex^.source, span, msg)
+    if not p^.is_lookahead {
+        print_diagnostic(p^.lex^.source, span, msg)
+    }
+}
+
+fn save_parser_state(mut p: ^Parser) -> ^ParserState {
+    mut state = alloc ParserState()
+    state^.pos = p^.lex^.pos
+    state^.line = p^.lex^.line
+    state^.col = p^.lex^.col
+    state^.current_token = p^.current_token
+    state^.next_token = p^.next_token
+    return state
+}
+
+fn restore_parser_state(mut p: ^Parser, state: ^ParserState) -> Void {
+    p^.lex^.pos = state^.pos
+    p^.lex^.line = state^.line
+    p^.lex^.col = state^.col
+    p^.current_token = state^.current_token
+    p^.next_token = state^.next_token
 }
 
 
-fn new_empty_expr_list() -> ^List(Spanned(Expression)) {
-    mut dummy = alloc Spanned(Expression)()
+fn new_empty_expr_list() -> ^List(^Spanned(Expression)) {
+    mut dummy = alloc ^Spanned(Expression)()
     return new_list(2, dummy)
 }
 
-fn push_expr_list(list: ^List(Spanned(Expression)), expr: Spanned(Expression)) -> Void {
+fn push_expr_list(list: ^List(^Spanned(Expression)), expr: ^Spanned(Expression)) -> Void {
     list_push(list, expr)
 }
 
@@ -706,9 +739,48 @@ fn parse_generic_params(mut p: ^Parser) -> ?^List(String) {
     return ret
 }
 
+fn parse_maybe_generic_params(mut p: ^Parser) -> ?^List(String) {
+    mut generic_params: ?^List(String) = None
+    if check_token(p^.current_token^.kind, "LParen") {
+        let state = save_parser_state(p)
+        p^.is_lookahead = true
+        
+        let dummy = parse_generic_params(p)
+        
+        let has_second_lparen = check_token(p^.current_token^.kind, "LParen")
+        
+        restore_parser_state(p, state)
+        p^.is_lookahead = false
+        
+        if has_second_lparen {
+            generic_params = parse_generic_params(p)
+        }
+    }
+    return generic_params
+}
+
 // ---------------------------------------------------------
 // Types
 // ---------------------------------------------------------
+fn get_token_int_value(kind: TokenKind) -> ?Int {
+    when kind {
+        Integer(val) -> {
+            mut ret: ?Int = None
+            ret = val
+            return ret
+        }
+        Data -> {} Fn -> {} Let -> {} Mut -> {} If -> {} Else -> {} While -> {} Return -> {} Break -> {} Continue -> {}
+        Use -> {} Extern -> {} Choice -> {} And -> {} Or -> {} Not -> {} BitAnd -> {} BitOr -> {} BitXor -> {} Shl -> {} Shr -> {} As -> {}
+        Assign -> {} AddAssign -> {} SubAssign -> {} MulAssign -> {} DivAssign -> {} Eq -> {} NotEq -> {} Lt -> {} LtEq -> {} Gt -> {} GtEq -> {}
+        Add -> {} Sub -> {} Mul -> {} Div -> {} Mod -> {} Pipe -> {} Arrow -> {} Caret -> {} Question -> {} Free -> {}
+        LBrace -> {} RBrace -> {} Colon -> {} Comma -> {} Dot -> {} DotDot -> {} Error(val) -> {} Eof -> {} RParen -> {} RBracket -> {} LBracket -> {}
+        Identifier(val) -> {} Float(val) -> {} StringLiteral(val) -> {} CharLiteral(val) -> {} NoneLiteral -> {}
+        LParen -> {} False -> {} Alloc -> {} True -> {} When -> {}
+    }
+    mut ret: ?Int = None
+    return ret
+}
+
 fn parse_type(mut p: ^Parser) -> ?^Spanned(Type) {
     let start_line = p^.current_token^.line
     let start_col = p^.current_token^.col
@@ -732,15 +804,53 @@ fn parse_type(mut p: ^Parser) -> ?^Spanned(Type) {
         return ret
     }
     
-    // Arrays and Generics skipped for this initial test translation
+    mut dummy_ptr = alloc ^Spanned(Type)()
+    mut generic_args = new_list(0, dummy_ptr)
+    if check_token(p^.current_token^.kind, "LParen") {
+        advance_parser(p) // consume '('
+        if not check_token(p^.current_token^.kind, "RParen") {
+            let arg_opt = parse_type(p)
+            when arg_opt {
+                None -> { }
+                arg -> { list_push(generic_args, arg) }
+            }
+            while check_token(p^.current_token^.kind, "Comma") {
+                advance_parser(p) // consume ','
+                if not check_token(p^.current_token^.kind, "RParen") {
+                    let next_arg_opt = parse_type(p)
+                    when next_arg_opt {
+                        None -> { }
+                        next_arg -> { list_push(generic_args, next_arg) }
+                    }
+                }
+            }
+        }
+        consume(p, "RParen", "Expected ')' after generic arguments")
+    }
+
+    mut is_array = false
+    mut array_size = 0
+    if check_token(p^.current_token^.kind, "LBracket") {
+        is_array = true
+        advance_parser(p) // consume '['
+        let size_opt = get_token_int_value(p^.current_token^.kind)
+        when size_opt {
+            None -> { }
+            size -> {
+                array_size = size
+                advance_parser(p)
+            }
+        }
+        consume(p, "RBracket", "Expected ']' after array size")
+    }
+    
     mut ty = alloc Type()
     ty^.name = name
     ty^.is_ptr = is_ptr
     ty^.is_nullable = is_nullable
-    ty^.is_array = false
-    ty^.array_size = 0
-    mut dummy_ptr = alloc Spanned(Type)()
-    ty^.generic_args = new_list(0, dummy_ptr)
+    ty^.is_array = is_array
+    ty^.array_size = array_size
+    ty^.generic_args = generic_args
     
     mut span = alloc_span(start_line, start_col, p^.current_token^.line, p^.current_token^.col)
     mut ret: ?^Spanned(Type) = alloc_spanned(Type)(ty^, span)
@@ -1046,7 +1156,7 @@ fn parse_block(mut p: ^Parser) -> ?^Spanned(Block) {
         return ret
     }
     
-    mut dummy_stmt = alloc Spanned(Statement)()
+    mut dummy_stmt = alloc ^Spanned(Statement)()
     mut statements = new_list(4, dummy_stmt)
     
     while not check_token(p^.current_token^.kind, "RBrace") and not check_token(p^.current_token^.kind, "Eof") {
@@ -1057,7 +1167,7 @@ fn parse_block(mut p: ^Parser) -> ?^Spanned(Block) {
                 advance_parser(p)
             }
             stmt -> {
-                list_push(statements, stmt^)
+                list_push(statements, stmt)
             }
         }
     }
@@ -1069,7 +1179,7 @@ fn parse_block(mut p: ^Parser) -> ?^Spanned(Block) {
     
     mut span = alloc_span(start_line, start_col, p^.current_token^.line, p^.current_token^.col)
     mut ret: ?^Spanned(Block) = None
-    ret = alloc_spanned(Block)(block, span)
+    ret = alloc_spanned(Block)(block^, span)
     return ret
 }
 
@@ -1087,28 +1197,32 @@ fn parse_fn_decl(mut p: ^Parser) -> ?^FnDecl {
     
     mut dummy_str = alloc String()
     mut generic_params = new_list(0, dummy_str)
-    // Skipped parsing generic params and lookahead
+    let gen_opt = parse_maybe_generic_params(p)
+    when gen_opt {
+        None -> {}
+        g -> { generic_params = g }
+    }
     
     if not consume(p, "LParen", "Expected '(' after function name") {
         mut ret: ?^FnDecl = None
         return ret
     }
     
-    mut dummy_param = alloc Param()
+    mut dummy_param = alloc ^Param()
     mut params = new_list(4, dummy_param)
     
     if not check_token(p^.current_token^.kind, "RParen") {
         let param_opt = parse_param(p)
         when param_opt {
             None -> {}
-            param -> { list_push(params, param^) }
+            param -> { list_push(params, param) }
         }
         while check_token(p^.current_token^.kind, "Comma") {
             advance_parser(p)
             let p_opt = parse_param(p)
             when p_opt {
                 None -> {}
-                pr -> { list_push(params, pr^) }
+                pr -> { list_push(params, pr) }
             }
         }
     }
@@ -1186,23 +1300,29 @@ fn parse_data_decl(mut p: ^Parser) -> ?^DataDecl {
         return ret 
     }
     
+    let gen_opt = parse_generic_params(p)
     mut dummy_str = alloc String()
-    mut generic_params = new_list(0, dummy_str)
-    // Skipped parsing generic params for now
+    mut generic_params: ^List(String) = new_list(0, dummy_str)
+    when gen_opt {
+        None -> {}
+        g -> { generic_params = g }
+    }
     
     if not consume(p, "LBrace", "Expected '{' before data body") { 
         mut ret: ?^DataDecl = None
         return ret 
     }
     
-    mut dummy_field = alloc FieldDecl()
+    mut dummy_field = alloc ^FieldDecl()
     mut fields = new_list(4, dummy_field)
     
     while not check_token(p^.current_token^.kind, "RBrace") and not check_token(p^.current_token^.kind, "Eof") {
         let field_opt = parse_field_decl(p)
         when field_opt {
-            None -> { }
-            field -> { list_push(fields, field^) }
+            None -> {
+                advance_parser(p)
+            }
+            field -> { list_push(fields, field) }
         }
         // comma consumption skipped for simplicity
     }
@@ -1292,7 +1412,7 @@ fn parse_choice_decl(mut p: ^Parser) -> ?^ChoiceDecl {
         return ret
     }
     
-    mut dummy_variant = alloc VariantDecl()
+    mut dummy_variant = alloc ^VariantDecl()
     mut variants = new_list(4, dummy_variant)
     
     while not check_token(p^.current_token^.kind, "RBrace") and not check_token(p^.current_token^.kind, "Eof") {
@@ -1309,7 +1429,7 @@ fn parse_choice_decl(mut p: ^Parser) -> ?^ChoiceDecl {
             return ret
         }
         
-        mut dummy_ty = alloc Spanned(Type)()
+        mut dummy_ty = alloc ^Spanned(Type)()
         mut associated_types = new_list(2, dummy_ty)
         
         if check_token(p^.current_token^.kind, "LParen") {
@@ -1318,7 +1438,7 @@ fn parse_choice_decl(mut p: ^Parser) -> ?^ChoiceDecl {
                 let ty_opt = parse_type(p)
                 when ty_opt {
                     None -> {}
-                    ty -> { list_push(associated_types, ty^) }
+                    ty -> { list_push(associated_types, ty) }
                 }
                 while check_token(p^.current_token^.kind, "Comma") {
                     advance_parser(p)
@@ -1326,7 +1446,7 @@ fn parse_choice_decl(mut p: ^Parser) -> ?^ChoiceDecl {
                         let t2_opt = parse_type(p)
                         when t2_opt {
                             None -> {}
-                            t2 -> { list_push(associated_types, t2^) }
+                            t2 -> { list_push(associated_types, t2) }
                         }
                     }
                 }
@@ -1337,7 +1457,7 @@ fn parse_choice_decl(mut p: ^Parser) -> ?^ChoiceDecl {
         mut vdecl = alloc VariantDecl()
         vdecl^.name = variant_name
         vdecl^.associated_types = associated_types
-        list_push(variants, vdecl^)
+        list_push(variants, vdecl)
         
         if check_token(p^.current_token^.kind, "Comma") {
             advance_parser(p)
@@ -1371,7 +1491,7 @@ fn parse_extern_decl(mut p: ^Parser) -> ?^ExternDecl {
         return ret 
     }
     
-    let gen_opt = parse_generic_params(p)
+    let gen_opt = parse_maybe_generic_params(p)
     mut generic_params: ^List(String) = new_list(0, alloc String())
     when gen_opt {
         None -> {}
@@ -1383,21 +1503,21 @@ fn parse_extern_decl(mut p: ^Parser) -> ?^ExternDecl {
         return ret
     }
     
-    mut dummy_param = alloc Param()
+    mut dummy_param = alloc ^Param()
     mut params = new_list(4, dummy_param)
     
     if not check_token(p^.current_token^.kind, "RParen") {
         let param_opt = parse_param(p)
         when param_opt {
             None -> {}
-            param -> { list_push(params, param^) }
+            param -> { list_push(params, param) }
         }
         while check_token(p^.current_token^.kind, "Comma") {
             advance_parser(p)
             let p_opt = parse_param(p)
             when p_opt {
                 None -> {}
-                pr -> { list_push(params, pr^) }
+                pr -> { list_push(params, pr) }
             }
         }
     }
@@ -1527,17 +1647,17 @@ fn parse_import_directive(mut p: ^Parser) -> ?^Spanned(ImportDirective) {
 fn parse_program(mut p: ^Parser) -> ^Program {
     mut prog = alloc Program()
     
-    mut dummy_import = alloc Spanned(ImportDirective)()
+    mut dummy_import = alloc ^Spanned(ImportDirective)()
     prog^.imports = new_list(0, dummy_import)
     
-    mut dummy_decl = alloc Spanned(Declaration)()
+    mut dummy_decl = alloc ^Spanned(Declaration)()
     prog^.declarations = new_list(10, dummy_decl)
     
     while check_token(p^.current_token^.kind, "Use") {
         let import_opt = parse_import_directive(p)
         when import_opt {
             None -> { advance_parser(p) }
-            imp -> { list_push(prog^.imports, imp^) }
+            imp -> { list_push(prog^.imports, imp) }
         }
     }
     
@@ -1549,7 +1669,7 @@ fn parse_program(mut p: ^Parser) -> ^Program {
                     advance_parser(p) // prevent infinite loop on error
                 }
             }
-            decl -> { list_push(prog^.declarations, decl^) }
+            decl -> { list_push(prog^.declarations, decl) }
         }
     }
     
@@ -1676,14 +1796,14 @@ fn parse_postfix_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
                             let arg_opt = parse_expression(p)
                             when arg_opt {
                                 None -> {}
-                                arg -> { push_expr_list(args, arg^) }
+                                arg -> { push_expr_list(args, arg) }
                             }
                             while check_token(p^.current_token^.kind, "Comma") {
                                 advance_parser(p)
                                 let n_opt = parse_expression(p)
                                 when n_opt {
                                     None -> {}
-                                    n -> { push_expr_list(args, n^) }
+                                    n -> { push_expr_list(args, n) }
                                 }
                             }
                         }
@@ -1739,14 +1859,14 @@ fn parse_postfix_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
                             let arg_opt = parse_expression(p)
                             when arg_opt {
                                 None -> {}
-                                arg -> { push_expr_list(args, arg^) }
+                                arg -> { push_expr_list(args, arg) }
                             }
                             while check_token(p^.current_token^.kind, "Comma") {
                                 advance_parser(p)
                                 let n_opt = parse_expression(p)
                                 when n_opt {
                                     None -> {}
-                                    n -> { push_expr_list(args, n^) }
+                                    n -> { push_expr_list(args, n) }
                                 }
                             }
                         }
@@ -1888,7 +2008,7 @@ fn parse_when_expr(mut p: ^Parser) -> ?^WhenExpr {
     
     consume(p, "LBrace", "Expected '{' before when cases")
     
-    mut dummy_case = alloc WhenCase()
+    mut dummy_case = alloc ^WhenCase()
     mut cases = new_list(4, dummy_case)
     
     while not check_token(p^.current_token^.kind, "RBrace") and not check_token(p^.current_token^.kind, "Eof") {
@@ -1945,7 +2065,7 @@ fn parse_when_expr(mut p: ^Parser) -> ?^WhenExpr {
                 case_decl^.variant_name = variant_name
                 case_decl^.bindings = bindings
                 case_decl^.body = b
-                list_push(cases, case_decl^)
+                list_push(cases, case_decl)
             }
         }
         
@@ -2018,14 +2138,14 @@ fn parse_primary_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
                 let a_opt = parse_expression(p)
                 when a_opt {
                     None -> {}
-                    a -> { push_expr_list(args, a^) }
+                    a -> { push_expr_list(args, a) }
                 }
                 while check_token(p^.current_token^.kind, "Comma") {
                     advance_parser(p)
                     let n_opt = parse_expression(p)
                     when n_opt {
                         None -> {}
-                        n -> { push_expr_list(args, n^) }
+                        n -> { push_expr_list(args, n) }
                     }
                 }
             }
@@ -2086,14 +2206,14 @@ fn parse_primary_expr(mut p: ^Parser) -> ?^Spanned(Expression) {
                             let a_opt = parse_expression(p)
                             when a_opt {
                                 None -> {}
-                                a -> { push_expr_list(args, a^) }
+                                a -> { push_expr_list(args, a) }
                             }
                             while check_token(p^.current_token^.kind, "Comma") {
                                 advance_parser(p)
                                 let n_opt = parse_expression(p)
                                 when n_opt {
                                     None -> {}
-                                    n -> { push_expr_list(args, n^) }
+                                    n -> { push_expr_list(args, n) }
                                 }
                             }
                         }

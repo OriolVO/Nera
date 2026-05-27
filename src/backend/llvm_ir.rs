@@ -60,7 +60,7 @@ impl LLVMValue {
     pub fn to_string(&self) -> String {
         match self {
             LLVMValue::Reg(name, _) => format!("%{}", name),
-            LLVMValue::Global(name, _) => format!("@{}", name),
+            LLVMValue::Global(name, _) => format!("@\"{}\"", name),
             LLVMValue::ConstI1(v) => if *v { "1".to_string() } else { "0".to_string() },
             LLVMValue::ConstI8(v) => v.to_string(),
             LLVMValue::ConstI32(v) => v.to_string(),
@@ -173,9 +173,9 @@ impl LLVMInstruction {
             LLVMInstruction::Call(dest_opt, ret_ty, name, args) => {
                 let arg_strs: Vec<String> = args.iter().map(|a| a.typed_string()).collect();
                 if let Some(dest) = dest_opt {
-                    format!("  %{} = call {} @{}({})", dest, ret_ty.to_string(), name, arg_strs.join(", "))
+                    format!("  %{} = call {} @\"{}\"({})", dest, ret_ty.to_string(), name, arg_strs.join(", "))
                 } else {
-                    format!("  call {} @{}({})", ret_ty.to_string(), name, arg_strs.join(", "))
+                    format!("  call {} @\"{}\"({})", ret_ty.to_string(), name, arg_strs.join(", "))
                 }
             }
             LLVMInstruction::Br(lbl, meta) => {
@@ -293,14 +293,23 @@ impl IRBuilder {
     }
 
     pub fn build_alloca(&mut self, name: &str, ty: LLVMType) -> LLVMValue {
-        self.push_instr(LLVMInstruction::Alloca(name.to_string(), ty.clone()));
+        let instr = LLVMInstruction::Alloca(name.to_string(), ty.clone());
+        // Always place allocas in the entry block (the first block) to guarantee dominance over all uses
+        if let Some(func) = &mut self.active_func {
+            if !func.blocks.is_empty() {
+                func.blocks[0].instrs.insert(0, instr);
+            } else if let Some(b) = &mut self.active_block {
+                // If there are no completed blocks, the active block IS the entry block
+                b.instrs.insert(0, instr);
+            }
+        }
         LLVMValue::Reg(name.to_string(), LLVMType::Pointer(Box::new(ty)))
     }
 
     pub fn build_load(&mut self, ptr: LLVMValue, align: Option<usize>) -> Result<LLVMValue, CompileError> {
         let ty = match ptr.get_type() {
             LLVMType::Pointer(inner) => *inner,
-            _ => return Err(CompileError::BackendError("build_load on non-pointer".to_string())), // Handled by outer match
+            _ => return Err(CompileError::BackendError(format!("build_load on non-pointer. Got type: {:?}, value: {}", ptr.get_type(), ptr.to_string()))), // Handled by outer match
         };
         let dest = self.next_reg_name();
         self.push_instr(LLVMInstruction::Load(dest.clone(), ty.clone(), ptr, align));
@@ -590,7 +599,7 @@ impl IRBuilder {
                     format!("{} %{}", t.to_string(), n)
                 }
             }).collect();
-            out.push_str(&format!("define {} @{}({}) {{\n", func.ret_ty.to_string(), func.name, param_strs.join(", ")));
+            out.push_str(&format!("define {} @\"{}\"({}) {{\n", func.ret_ty.to_string(), func.name, param_strs.join(", ")));
             for block in &func.blocks {
                 out.push_str(&format!("{}:\n", block.name));
                 for instr in &block.instrs {

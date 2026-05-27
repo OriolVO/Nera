@@ -1,0 +1,5 @@
+use std.collections
+fn main() {
+    mut x = alloc ^Param()
+    let y = new_list(2, x)
+}

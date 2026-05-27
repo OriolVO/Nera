@@ -1,0 +1,605 @@
+// compiler/midend/optimizer.nera
+use std.collections
+use std.string
+use compiler.midend.ir
+
+data SoAArray {
+    name: String
+    size: Int
+}
+
+data OptimizedIR {
+    functions: ^List(IRFunction)
+    soa_arrays: ^List(SoAArray)
+    global_instructions: ^List(IRInstruction)
+}
+
+data UseDef {
+    uses: ^List(String)
+    defs: ^List(String)
+}
+
+data IntListPtr { ptr: ^List(Int) }
+data StringSetPtr { ptr: ^StringSet }
+
+data IROptimizer {
+    dummy: Int // Namespace
+}
+
+fn ir_optimizer_new() -> ^IROptimizer {
+    mut opt = alloc IROptimizer()
+    opt^.dummy = 0
+    return opt
+}
+
+fn add_soa(list: ^List(SoAArray), name: String, size: Int) {
+    mut exists = false
+    mut i = 0
+    while i < list^.length {
+        let item = list_get(list, i)
+        if string_eq(item.name, name) {
+            exists = true
+        }
+        i = i + 1
+    }
+    if not exists {
+        mut new_soa = alloc SoAArray()
+        new_soa^.name = name
+        new_soa^.size = size
+        list_push(list, new_soa^)
+    }
+}
+
+fn optimizer_run_soa_pass_globals(opt: ^IROptimizer, instrs: ^List(IRInstruction)) -> ^List(SoAArray) {
+    mut dummy_soa = alloc SoAArray()
+    mut soa_list = new_list(10, dummy_soa)
+    
+    mut i = 0
+    while i < instrs^.length {
+        let instr = list_get(instrs, i)
+        when instr {
+            FlatVectorApply(target_array, ops, start_op, end_op, size) -> {
+                mut j = 0
+                while j < ops^.length {
+                    let op = list_get(ops, j)
+                    let full_name = concat_strings(target_array, concat_strings("_", op.prop))
+                    add_soa(soa_list, full_name, size)
+                    
+                    when op.operand {
+                        Vector(rhs_arr, rhs_prop) -> {
+                            let rhs_full = concat_strings(rhs_arr, concat_strings("_", rhs_prop))
+                            add_soa(soa_list, rhs_full, size)
+                        }
+                        Scalar(s) -> {}
+                    }
+                    j = j + 1
+                }
+            }
+            LoadArrayElement(dest, array, prop, index, size) -> {
+                let full_name = concat_strings(array, concat_strings("_", prop))
+                add_soa(soa_list, full_name, size)
+            }
+            StoreArrayElement(array, prop, index, val, size) -> {
+                let full_name = concat_strings(array, concat_strings("_", prop))
+                add_soa(soa_list, full_name, size)
+            }
+            Assign(d, s) -> {} UnaryOp(d, o, s) -> {} BinaryOp(d, o, l, r) -> {} LoadProperty(d, o, p) -> {}
+            StoreProperty(o, p, v) -> {} Call(d, c, a) -> {} ExtractTag(d, o) -> {} ExtractPayload(d, o, idx) -> {}
+            ConstructADT(d, t, a) -> {} Alloc(d, t, s) -> {} Free(p) -> {} LoadPointer(d, p) -> {} StorePointer(p, v) -> {}
+            LoadStructField(d, p, i, t) -> {} StoreStructField(p, i, v) -> {} LoadStringChar(d, p, i) -> {}
+            Substring(d, p, s, e) -> {} StringCompare(d, l, r, b) -> {} Cast(d, t, s) -> {}
+        }
+        i = i + 1
+    }
+    return soa_list
+}
+
+fn optimizer_run_soa_pass_func(opt: ^IROptimizer, func: ^IRFunction) -> ^List(SoAArray) {
+    mut dummy_soa = alloc SoAArray()
+    mut soa_list = new_list(10, dummy_soa)
+    
+    mut b = 0
+    while b < func^.blocks^.length {
+        let block = list_get(func^.blocks, b)
+        mut i = 0
+        while i < block.instrs^.length {
+            let instr = list_get(block.instrs, i)
+            when instr {
+                FlatVectorApply(target_array, ops, start_op, end_op, size) -> {
+                    mut j = 0
+                    while j < ops^.length {
+                        let op = list_get(ops, j)
+                        let full_name = concat_strings(target_array, concat_strings("_", op.prop))
+                        add_soa(soa_list, full_name, size)
+                        
+                        when op.operand {
+                            Vector(rhs_arr, rhs_prop) -> {
+                                let rhs_full = concat_strings(rhs_arr, concat_strings("_", rhs_prop))
+                                add_soa(soa_list, rhs_full, size)
+                            }
+                            Scalar(s) -> {}
+                        }
+                        j = j + 1
+                    }
+                }
+                LoadArrayElement(dest, array, prop, index, size) -> {
+                    let full_name = concat_strings(array, concat_strings("_", prop))
+                    add_soa(soa_list, full_name, size)
+                }
+                StoreArrayElement(array, prop, index, val, size) -> {
+                    let full_name = concat_strings(array, concat_strings("_", prop))
+                    add_soa(soa_list, full_name, size)
+                }
+                Assign(d, s) -> {} UnaryOp(d, o, s) -> {} BinaryOp(d, o, l, r) -> {} LoadProperty(d, o, p) -> {}
+                StoreProperty(o, p, v) -> {} Call(d, c, a) -> {} ExtractTag(d, o) -> {} ExtractPayload(d, o, idx) -> {}
+                ConstructADT(d, t, a) -> {} Alloc(d, t, s) -> {} Free(p) -> {} LoadPointer(d, p) -> {} StorePointer(p, v) -> {}
+                LoadStructField(d, p, i, t) -> {} StoreStructField(p, i, v) -> {} LoadStringChar(d, p, i) -> {}
+                Substring(d, p, s, e) -> {} StringCompare(d, l, r, b) -> {} Cast(d, t, s) -> {}
+            }
+            i = i + 1
+        }
+        b = b + 1
+    }
+    return soa_list
+}
+
+fn operand_to_var(opt: ^IROptimizer, op: ^IROperand) -> String {
+    when op^ {
+        Variable(name) -> { return name }
+        TempReg(r) -> { return concat_strings("%t", int_to_string(r)) }
+        LiteralInt(v) -> {} LiteralFloat(v) -> {} LiteralString(v) -> {} LiteralChar(v) -> {} LiteralBool(v) -> {} Void -> {} NoneLiteral -> {}
+    }
+    return ""
+}
+
+fn add_use(opt: ^IROptimizer, uses: ^List(String), op: ^IROperand) {
+    let var_name = operand_to_var(opt, op)
+    if not string_eq(var_name, "") {
+        list_push(uses, var_name)
+    }
+}
+
+fn add_def(opt: ^IROptimizer, defs: ^List(String), op: ^IROperand) {
+    let var_name = operand_to_var(opt, op)
+    if not string_eq(var_name, "") {
+        list_push(defs, var_name)
+    }
+}
+
+fn instr_use_def(opt: ^IROptimizer, instr: IRInstruction) -> ^UseDef {
+    mut res = alloc UseDef()
+    mut dummy_str = alloc String()
+    dummy_str^ = ""
+    res^.uses = new_list(5, dummy_str)
+    res^.defs = new_list(5, dummy_str)
+    
+    when instr {
+        Assign(dest, src) -> {
+            add_use(opt, res^.uses, src)
+            add_def(opt, res^.defs, dest)
+        }
+        UnaryOp(dest, op, operand) -> {
+            add_use(opt, res^.uses, operand)
+            add_def(opt, res^.defs, dest)
+        }
+        BinaryOp(dest, op, left, right) -> {
+            add_use(opt, res^.uses, left)
+            add_use(opt, res^.uses, right)
+            add_def(opt, res^.defs, dest)
+        }
+        Cast(dest, target_type, src) -> {
+            add_use(opt, res^.uses, src)
+            add_def(opt, res^.defs, dest)
+        }
+        LoadProperty(dest, obj, prop) -> {
+            add_use(opt, res^.uses, obj)
+            add_def(opt, res^.defs, dest)
+        }
+        StoreProperty(obj, prop, val) -> {
+            add_use(opt, res^.uses, obj)
+            add_use(opt, res^.uses, val)
+        }
+        Call(dest_opt, callee, args) -> {
+            add_use(opt, res^.uses, callee)
+            mut i = 0
+            while i < args^.length {
+                let a = list_get(args, i)
+                mut a_ptr = alloc IROperand()
+                a_ptr^ = a
+                add_use(opt, res^.uses, a_ptr)
+                i = i + 1
+            }
+            if dest_opt != None {
+                let d: ^IROperand = dest_opt
+                add_def(opt, res^.defs, d)
+            }
+        }
+        FlatVectorApply(target, ops, start, end, size) -> {
+            add_use(opt, res^.uses, start)
+            add_use(opt, res^.uses, end)
+            mut i = 0
+            while i < ops^.length {
+                let vop = list_get(ops, i)
+                when vop.operand {
+                    Scalar(op) -> { add_use(opt, res^.uses, op) }
+                    Vector(a, p) -> {}
+                }
+                i = i + 1
+            }
+        }
+        ExtractTag(dest, obj) -> {
+            add_use(opt, res^.uses, obj)
+            add_def(opt, res^.defs, dest)
+        }
+        LoadArrayElement(dest, array, prop, index, size) -> {
+            add_use(opt, res^.uses, index)
+            add_def(opt, res^.defs, dest)
+        }
+        StoreArrayElement(array, prop, index, val, size) -> {
+            add_use(opt, res^.uses, index)
+            add_use(opt, res^.uses, val)
+        }
+        ExtractPayload(dest, obj, idx) -> {
+            add_use(opt, res^.uses, obj)
+            add_def(opt, res^.defs, dest)
+        }
+        Alloc(dest, ty, size) -> {
+            add_def(opt, res^.defs, dest)
+        }
+        LoadPointer(dest, ptr) -> {
+            add_use(opt, res^.uses, ptr)
+            add_def(opt, res^.defs, dest)
+        }
+        StorePointer(ptr, val) -> {
+            add_use(opt, res^.uses, ptr)
+            add_use(opt, res^.uses, val)
+        }
+        ConstructADT(dest, tag, args) -> {
+            mut i = 0
+            while i < args^.length {
+                let a = list_get(args, i)
+                mut a_ptr = alloc IROperand()
+                a_ptr^ = a
+                add_use(opt, res^.uses, a_ptr)
+                i = i + 1
+            }
+            add_def(opt, res^.defs, dest)
+        }
+        Free(ptr) -> {
+            add_use(opt, res^.uses, ptr)
+        }
+        LoadStructField(dest, ptr, idx, ty) -> {
+            add_use(opt, res^.uses, ptr)
+            add_def(opt, res^.defs, dest)
+        }
+        StoreStructField(ptr, idx, val) -> {
+            add_use(opt, res^.uses, ptr)
+            add_use(opt, res^.uses, val)
+        }
+        LoadStringChar(dest, str_ptr, index) -> {
+            add_use(opt, res^.uses, str_ptr)
+            add_use(opt, res^.uses, index)
+            add_def(opt, res^.defs, dest)
+        }
+        Substring(dest, str_ptr, start, end) -> {
+            add_use(opt, res^.uses, str_ptr)
+            add_use(opt, res^.uses, start)
+            add_use(opt, res^.uses, end)
+            add_def(opt, res^.defs, dest)
+        }
+        StringCompare(dest, left, right, is_eq) -> {
+            add_use(opt, res^.uses, left)
+            add_use(opt, res^.uses, right)
+            add_def(opt, res^.defs, dest)
+        }
+    }
+    
+    return res
+}
+
+fn get_block_index(func: ^IRFunction, name: String) -> Int {
+    mut i = 0
+    while i < func^.blocks^.length {
+        let b = list_get(func^.blocks, i)
+        if string_eq(b.name, name) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn optimizer_run_liveness_and_dce(opt: ^IROptimizer, mut func: ^IRFunction) {
+    let num_blocks = func^.blocks^.length
+    if num_blocks == 0 { return }
+    
+    mut dummy_int = alloc Int()
+    dummy_int^ = 0
+    mut dummy_int_list = new_list(1, dummy_int)
+    
+    mut dummy_succ = alloc IntListPtr()
+    dummy_succ^.ptr = dummy_int_list
+    mut succs = new_list(num_blocks, dummy_succ)
+    
+    mut dummy_set = alloc StringSetPtr()
+    dummy_set^.ptr = new_string_set()
+    
+    mut def_sets = new_list(num_blocks, dummy_set)
+    mut use_sets = new_list(num_blocks, dummy_set)
+    mut in_sets = new_list(num_blocks, dummy_set)
+    mut out_sets = new_list(num_blocks, dummy_set)
+    
+    mut b = 0
+    while b < num_blocks {
+        let block = list_get(func^.blocks, b)
+        mut s_list = new_list(2, dummy_int)
+        
+        when block.terminator {
+            Jump(tgt) -> {
+                let idx = get_block_index(func, tgt)
+                if idx >= 0 { list_push(s_list, idx) }
+            }
+            Branch(cond, true_tgt, false_tgt) -> {
+                let idx_t = get_block_index(func, true_tgt)
+                let idx_f = get_block_index(func, false_tgt)
+                if idx_t >= 0 { list_push(s_list, idx_t) }
+                if idx_f >= 0 { list_push(s_list, idx_f) }
+            }
+            Return(v) -> {} None -> {}
+        }
+        mut s_wrapper = alloc IntListPtr()
+        s_wrapper^.ptr = s_list
+        list_set(succs, b, s_wrapper^)
+        
+        mut b_def = new_string_set()
+        mut b_use = new_string_set()
+        
+        mut i = 0
+        while i < block.instrs^.length {
+            let instr = list_get(block.instrs, i)
+            let ud = instr_use_def(opt, instr)
+            
+            mut u_idx = 0
+            while u_idx < ud^.uses^.length {
+                let u = list_get(ud^.uses, u_idx)
+                if not string_set_contains(b_def, u) { string_set_add(b_use, u) }
+                u_idx = u_idx + 1
+            }
+            
+            mut d_idx = 0
+            while d_idx < ud^.defs^.length {
+                let d = list_get(ud^.defs, d_idx)
+                string_set_add(b_def, d)
+                d_idx = d_idx + 1
+            }
+            i = i + 1
+        }
+        
+        when block.terminator {
+            Branch(cond, t, f) -> {
+                let u = operand_to_var(opt, cond)
+                if not string_eq(u, "") and not string_set_contains(b_def, u) { string_set_add(b_use, u) }
+            }
+            Return(val_opt) -> {
+                if val_opt != None {
+                    let val: ^IROperand = val_opt
+                    let u = operand_to_var(opt, val)
+                    if not string_eq(u, "") and not string_set_contains(b_def, u) { string_set_add(b_use, u) }
+                }
+            }
+            Jump(t) -> {} None -> {}
+        }
+        
+        mut def_wrapper = alloc StringSetPtr()
+        def_wrapper^.ptr = b_def
+        list_set(def_sets, b, def_wrapper^)
+        
+        mut use_wrapper = alloc StringSetPtr()
+        use_wrapper^.ptr = b_use
+        list_set(use_sets, b, use_wrapper^)
+        
+        mut in_wrapper = alloc StringSetPtr()
+        in_wrapper^.ptr = new_string_set()
+        list_set(in_sets, b, in_wrapper^)
+        
+        mut out_wrapper = alloc StringSetPtr()
+        out_wrapper^.ptr = new_string_set()
+        list_set(out_sets, b, out_wrapper^)
+        
+        b = b + 1
+    }
+    
+    // Fix-point iteration
+    mut changed = true
+    while changed {
+        changed = false
+        mut b_idx = num_blocks - 1
+        while b_idx >= 0 {
+            mut new_out = new_string_set()
+            
+            let succ_wrapper = list_get(succs, b_idx)
+            let s_list = succ_wrapper.ptr
+            
+            mut s_i = 0
+            while s_i < s_list^.length {
+                let s_val = list_get(s_list, s_i)
+                let in_wrapper = list_get(in_sets, s_val)
+                let s_in = in_wrapper.ptr
+                
+                mut v_i = 0
+                while v_i < s_in^.items^.length {
+                    let v = list_get(s_in^.items, v_i)
+                    string_set_add(new_out, v)
+                    v_i = v_i + 1
+                }
+                s_i = s_i + 1
+            }
+            
+            let out_wrapper = list_get(out_sets, b_idx)
+            let old_out = out_wrapper.ptr
+            
+            if not string_set_equals(new_out, old_out) {
+                mut new_out_wrapper = alloc StringSetPtr()
+                new_out_wrapper^.ptr = new_out
+                list_set(out_sets, b_idx, new_out_wrapper^)
+                changed = true
+            } else {
+                new_out = old_out
+            }
+            
+            let use_wrapper = list_get(use_sets, b_idx)
+            mut new_in = string_set_copy(use_wrapper.ptr)
+            
+            let def_wrapper = list_get(def_sets, b_idx)
+            let b_def = def_wrapper.ptr
+            
+            mut v_i2 = 0
+            while v_i2 < new_out^.items^.length {
+                let v = list_get(new_out^.items, v_i2)
+                if not string_set_contains(b_def, v) {
+                    string_set_add(new_in, v)
+                }
+                v_i2 = v_i2 + 1
+            }
+            
+            let old_in_wrapper = list_get(in_sets, b_idx)
+            let old_in = old_in_wrapper.ptr
+            
+            if not string_set_equals(new_in, old_in) {
+                mut new_in_wrapper = alloc StringSetPtr()
+                new_in_wrapper^.ptr = new_in
+                list_set(in_sets, b_idx, new_in_wrapper^)
+                changed = true
+            }
+            
+            b_idx = b_idx - 1
+        }
+    }
+    
+    // DCE Pass
+    b = 0
+    while b < num_blocks {
+        mut block = list_get(func^.blocks, b)
+        
+        let out_wrapper = list_get(out_sets, b)
+        mut live_now = string_set_copy(out_wrapper.ptr)
+        
+        when block.terminator {
+            Branch(cond, t, f) -> {
+                let u = operand_to_var(opt, cond)
+                if not string_eq(u, "") { string_set_add(live_now, u) }
+            }
+            Return(val_opt) -> {
+                if val_opt != None {
+                    let val: ^IROperand = val_opt
+                    let u = operand_to_var(opt, val)
+                    if not string_eq(u, "") { string_set_add(live_now, u) }
+                }
+            }
+            Jump(t) -> {} None -> {}
+        }
+        
+        mut dummy_instr = alloc IRInstruction()
+        mut opt_instrs = new_list(10, dummy_instr)
+        
+        mut inst_idx = block.instrs^.length - 1
+        while inst_idx >= 0 {
+            let instr = list_get(block.instrs, inst_idx)
+            let ud = instr_use_def(opt, instr)
+            
+            mut has_side_effects = false
+            when instr {
+                Call(d, c, a) -> { has_side_effects = true }
+                StoreProperty(o, p, v) -> { has_side_effects = true }
+                FlatVectorApply(t, o, s, e, sz) -> { has_side_effects = true }
+                StoreArrayElement(a, p, i, v, sz) -> { has_side_effects = true }
+                Free(p) -> { has_side_effects = true }
+                StoreStructField(p, i, v) -> { has_side_effects = true }
+                Assign(d, s) -> {} UnaryOp(d, o, s) -> {} BinaryOp(d, o, l, r) -> {} LoadProperty(d, o, p) -> {}
+                ExtractTag(d, o) -> {} ExtractPayload(d, o, idx) -> {} ConstructADT(d, t, a) -> {} Alloc(d, t, s) -> {}
+                LoadPointer(d, p) -> {} StorePointer(p, v) -> {} LoadStructField(d, p, i, t) -> {}
+                LoadArrayElement(d, a, p, idx, sz) -> {} LoadStringChar(d, p, i) -> {} Substring(d, p, s, e) -> {}
+                StringCompare(d, l, r, b) -> {} Cast(d, t, s) -> {}
+            }
+            
+            mut is_dead = true
+            mut d_idx = 0
+            while d_idx < ud^.defs^.length {
+                let d = list_get(ud^.defs, d_idx)
+                if string_set_contains(live_now, d) {
+                    is_dead = false
+                }
+                d_idx = d_idx + 1
+            }
+            
+            if ud^.defs^.length == 0 {
+                is_dead = false
+            }
+            
+            if not is_dead or has_side_effects {
+                d_idx = 0
+                while d_idx < ud^.defs^.length {
+                    let d = list_get(ud^.defs, d_idx)
+                    string_set_remove(live_now, d)
+                    d_idx = d_idx + 1
+                }
+                mut u_idx = 0
+                while u_idx < ud^.uses^.length {
+                    let u = list_get(ud^.uses, u_idx)
+                    string_set_add(live_now, u)
+                    u_idx = u_idx + 1
+                }
+                list_push(opt_instrs, instr)
+            }
+            
+            inst_idx = inst_idx - 1
+        }
+        
+        mut final_instrs = new_list(opt_instrs^.length, dummy_instr)
+        mut rev_idx = opt_instrs^.length - 1
+        while rev_idx >= 0 {
+            let instr = list_get(opt_instrs, rev_idx)
+            list_push(final_instrs, instr)
+            rev_idx = rev_idx - 1
+        }
+        
+        block.instrs = final_instrs
+        list_set(func^.blocks, b, block)
+        b = b + 1
+    }
+}
+
+fn optimizer_optimize(opt: ^IROptimizer, functions: ^List(IRFunction), global_instructions: ^List(IRInstruction)) -> ^OptimizedIR {
+    mut soa_arrays = optimizer_run_soa_pass_globals(opt, global_instructions)
+    
+    mut dummy_func = alloc IRFunction()
+    if functions^.length > 0 {
+        dummy_func^ = list_get(functions, 0)
+    }
+    mut optimized_functions = new_list(10, dummy_func)
+    
+    mut i = 0
+    while i < functions^.length {
+        mut func_val = list_get(functions, i)
+        mut func = alloc IRFunction()
+        func^ = func_val
+        
+        let func_soa = optimizer_run_soa_pass_func(opt, func)
+        mut j = 0
+        while j < func_soa^.length {
+            let item = list_get(func_soa, j)
+            add_soa(soa_arrays, item.name, item.size)
+            j = j + 1
+        }
+        
+        optimizer_run_liveness_and_dce(opt, func)
+        
+        list_push(optimized_functions, func^)
+        i = i + 1
+    }
+    
+    mut res = alloc OptimizedIR()
+    res^.functions = optimized_functions
+    res^.soa_arrays = soa_arrays
+    res^.global_instructions = global_instructions
+    
+    return res
+}

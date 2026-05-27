@@ -20,44 +20,44 @@ choice TypeInfo {
     NoneVariant
 }
 
-fn type_info_from_ast(ty: ^Type) -> ^TypeInfo {
+fn type_info_from_ast(ty: Type) -> ^TypeInfo {
     mut base = TypeInfo.Unknown
     
-    if ty^.name == "Int" {
+    if ty.name == "Int" {
         base = TypeInfo.Int
-    } else if ty^.name == "Float" {
+    } else if ty.name == "Float" {
         base = TypeInfo.Float
-    } else if ty^.name == "Boolean" {
+    } else if ty.name == "Boolean" {
         base = TypeInfo.Boolean
-    } else if ty^.name == "String" {
+    } else if ty.name == "String" {
         base = TypeInfo.String
-    } else if ty^.name == "Char" {
+    } else if ty.name == "Char" {
         base = TypeInfo.Char
-    } else if ty^.name == "Void" {
+    } else if ty.name == "Void" {
         base = TypeInfo.Void
-    } else if ty^.name == "Unknown" {
+    } else if ty.name == "Unknown" {
         base = TypeInfo.Unknown
     } else {
-        base = TypeInfo.Custom(ty^.name)
+        base = TypeInfo.Custom(ty.name)
     }
     
     mut resolved = base
-    if ty^.is_array {
+    if ty.is_array {
         mut arr = alloc TypeInfoArray()
         mut inner_box = alloc TypeInfo()
         inner_box^ = base
         arr^.inner = inner_box
-        arr^.size = ty^.array_size
+        arr^.size = ty.array_size
         resolved = TypeInfo.Array(arr)
     }
     
-    if ty^.is_ptr {
+    if ty.is_ptr {
         mut inner_box = alloc TypeInfo()
         inner_box^ = resolved
         resolved = TypeInfo.Pointer(inner_box)
     }
     
-    if ty^.is_nullable {
+    if ty.is_nullable {
         mut inner_box = alloc TypeInfo()
         inner_box^ = resolved
         resolved = TypeInfo.Nullable(inner_box)

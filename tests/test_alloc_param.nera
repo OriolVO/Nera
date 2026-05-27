@@ -1,0 +1,6 @@
+data Param { is_mut: Boolean }
+fn main() {
+    mut param = alloc Param()
+    let p: ^Param = param
+    param^.is_mut = true
+}
