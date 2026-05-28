@@ -219,11 +219,58 @@ fn run_compiler(command: String, filename: String, program_args: ^List(String)) 
     mut ir_gen = ir_gen_new()
     ir_generate(ir_gen, master_program)
     
-    mut optimizer = ir_optimizer_new()
-    let opt_ir = optimizer_optimize(optimizer, ir_gen^.functions, ir_gen^.global_instructions)
+    puts(concat_strings("DEBUG Declarations count: ", int_to_string(master_program^.declarations^.length)))
+    puts(concat_strings("DEBUG Generated functions count: ", int_to_string(ir_gen^.functions^.length)))
+    mut dbg_i = 0
+    while dbg_i < ir_gen^.functions^.length {
+        let f = list_get(ir_gen^.functions, dbg_i)
+        puts(concat_strings(concat_strings("  Function: ", f.name), concat_strings(" Blocks count: ", int_to_string(f.blocks^.length))))
+        mut dbg_b = 0
+        while dbg_b < f.blocks^.length {
+            let b = list_get(f.blocks, dbg_b)
+            puts(concat_strings(concat_strings("    Block: ", b.name), concat_strings(" Instrs count: ", int_to_string(b.instrs^.length))))
+            dbg_b = dbg_b + 1
+        }
+        dbg_i = dbg_i + 1
+    }
+    
+    mut opt_ir = alloc OptimizedIR()
+    opt_ir^.functions = ir_gen^.functions
+    mut dummy_soa = alloc SoAArray()
+    opt_ir^.soa_arrays = new_list(0, dummy_soa)
+    opt_ir^.global_instructions = ir_gen^.global_instructions
+    
+    mut dummy_ds = alloc ^DataStructInfo()
+    mut data_structs = new_list(10, dummy_ds)
+    
+    mut decl_idx = 0
+    while decl_idx < master_program^.declarations^.length {
+        let span_decl = list_get(master_program^.declarations, decl_idx)
+        when span_decl^.node {
+            Data(data_decl) -> {
+                mut ds_info = alloc DataStructInfo()
+                ds_info^.name = data_decl^.name
+                
+                mut dummy_str = alloc String()
+                dummy_str^ = ""
+                ds_info^.fields = new_list(10, dummy_str)
+                
+                mut field_idx = 0
+                while field_idx < data_decl^.fields^.length {
+                    let f_decl = list_get(data_decl^.fields, field_idx)
+                    list_push(ds_info^.fields, f_decl^.name)
+                    field_idx = field_idx + 1
+                }
+                
+                list_push(data_structs, ds_info)
+            }
+            Choice(c) -> {} Fn(f) -> {} Extern(e) -> {} Var(v) -> {}
+        }
+        decl_idx = decl_idx + 1
+    }
     
     mut llvm_gen = llvm_generator_new()
-    let llvm_text = llvm_generator_generate(llvm_gen, opt_ir)
+    let llvm_text = llvm_generator_generate(llvm_gen, opt_ir, data_structs)
     
     let base_name = string_replace(filename, ".nera", "")
     let ll_filename = concat_strings(base_name, ".ll")

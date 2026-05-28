@@ -612,17 +612,32 @@ impl IRGenerator {
                 let ty_name = alloc_expr.ty.node.name.clone();
                 let mut size_in_bytes = 8;
                 let base_name = ty_name.split('(').next().unwrap_or(&ty_name).to_string();
-                
+
+                let mut found = false;
                 for (key, fields) in &self.data_structs {
                     if key == &base_name || key.starts_with(&format!("{}(", base_name)) {
                         size_in_bytes = (fields.len() as i64) * 8;
                         if size_in_bytes == 0 {
                             size_in_bytes = 8;
                         }
+                        found = true;
                         break;
                     }
                 }
-                
+
+                // FIX: Si l'estructura no és 'Data', segurament és un 'Choice' o tipus genèric.
+                // Donem un buffer gran per evitar desbordaments de memòria.
+                if !found {
+                    if base_name == "List" {
+                        size_in_bytes = 24; // capacitat + length + buffer
+                    } else if base_name == "HashMap" {
+                        size_in_bytes = 8; // pointer a entries
+                    } else {
+                        // Per AST Nodes (Expression, Statement) o Choice (IRInstruction)...
+                        size_in_bytes = 128; 
+                    }
+                }
+
                 self.emit(IRInstruction::Alloc(dest.clone(), ty_name, size_in_bytes as usize));
                 dest
             }

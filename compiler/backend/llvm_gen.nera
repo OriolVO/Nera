@@ -12,6 +12,10 @@ extern fn string_starts_with(s: String, prefix: String) -> Boolean
 extern fn string_substring(s: String, start: Int, end: Int) -> String
 extern fn string_replace(s: String, old_str: String, new_str: String) -> String
 extern fn char_to_int(c: Char) -> Int
+extern fn get_choice_tag(ptr: ^LLVMInstruction) -> Int
+extern fn get_choice_tag_ir(ptr: ^IRInstruction) -> Int
+
+
 
 data TypeInfoPtr { ptr: ^TypeInfo }
 data LLVMValuePtr { ptr: ^LLVMValue }
@@ -60,7 +64,12 @@ fn ir_builder_push_instr(mut b: ^IRBuilder, instr: LLVMInstruction) {
     mut blk_opt = b^.active_block
     if blk_opt != None {
         mut blk: ^LLVMBasicBlock = blk_opt
+        mut instr_ptr = alloc LLVMInstruction()
+        instr_ptr^ = instr
+        puts(concat_strings("DEBUG BUILDER: pushing instr to block: ", blk^.name))
         list_push(blk^.instrs, instr)
+    } else {
+        puts("DEBUG BUILDER: active_block is NONE when pushing instruction!")
     }
 }
 
@@ -84,6 +93,7 @@ fn ir_builder_end_function(mut b: ^IRBuilder) {
         mut fn_opt = b^.active_func
         if fn_opt != None {
             mut func: ^LLVMFunction = fn_opt
+            puts(concat_strings(concat_strings("DEBUG BUILDER: end_function pushing block ", blk^.name), concat_strings(" to func: ", func^.name)))
             list_push(func^.blocks, blk^)
         }
         b^.active_block = None
@@ -91,18 +101,21 @@ fn ir_builder_end_function(mut b: ^IRBuilder) {
     mut fn_opt2 = b^.active_func
     if fn_opt2 != None {
         let func2: ^LLVMFunction = fn_opt2
+        puts(concat_strings("DEBUG BUILDER: end_function pushing func: ", func2^.name))
         list_push(b^.module^.funcs, func2^)
         b^.active_func = None
     }
 }
 
 fn ir_builder_start_block(mut b: ^IRBuilder, name: String) {
+    puts(concat_strings("DEBUG BUILDER: start_block: ", name))
     mut blk_opt = b^.active_block
     if blk_opt != None {
         mut blk: ^LLVMBasicBlock = blk_opt
         mut fn_opt = b^.active_func
         if fn_opt != None {
             mut func: ^LLVMFunction = fn_opt
+            puts(concat_strings(concat_strings("DEBUG BUILDER: start_block pushing previous block ", blk^.name), concat_strings(" to func: ", func^.name)))
             list_push(func^.blocks, blk^)
         }
     }
@@ -447,16 +460,23 @@ fn ir_builder_build_global_string_ptr(mut b: ^IRBuilder, value: String) -> ^LLVM
 // LLVM GENERATOR
 // ==========================================
 
+data DataStructInfo {
+    name: String
+    fields: ^List(String)
+}
+
 data LLVMGenerator {
     type_env: ^HashMap(TypeInfoPtr)
     builder: ^IRBuilder
     temp_map: ^HashMap(LLVMValuePtr)
     function_params: ^HashMap(LLVMValuePtr)
     scalar_vars: ^StringSet
+    parameter_names: ^StringSet
     main_arena_ptr: ?^LLVMValue
     shared_vec_idx: ?^LLVMValue
     func_ret_types: ^HashMap(LLVMTypePtr)
     actual_soa_arrays: ^List(SoAArray)
+    data_structs: ^List(^DataStructInfo)
 }
 
 fn llvm_generator_new() -> ^LLVMGenerator {
@@ -472,6 +492,7 @@ fn llvm_generator_new() -> ^LLVMGenerator {
     gen^.function_params = new_hashmap(dummy_lvp)
     
     gen^.scalar_vars = new_string_set()
+    gen^.parameter_names = new_string_set()
     gen^.main_arena_ptr = None
     gen^.shared_vec_idx = None
     
@@ -481,7 +502,61 @@ fn llvm_generator_new() -> ^LLVMGenerator {
     mut dummy_soa = alloc SoAArray()
     gen^.actual_soa_arrays = new_list(10, dummy_soa)
     
+    mut dummy_ds = alloc ^DataStructInfo()
+    gen^.data_structs = new_list(10, dummy_ds)
+    
     return gen
+}
+
+fn llvm_generator_get_struct_name(gen: ^LLVMGenerator, ty: ^TypeInfo) -> ?String {
+    when ty^ {
+        Custom(name) -> {
+            mut ret: ?String = None
+            ret = name
+            return ret
+        }
+        Pointer(inner) -> {
+            return llvm_generator_get_struct_name(gen, inner)
+        }
+        Nullable(inner) -> {
+            return llvm_generator_get_struct_name(gen, inner)
+        }
+        Int -> {} Float -> {} Boolean -> {} String -> {} Char -> {} Void -> {} Array(a) -> {} Unknown -> {} NoneVariant -> {}
+    }
+    mut ret: ?String = None
+    return ret
+}
+
+fn llvm_generator_is_custom_struct(gen: ^LLVMGenerator, struct_name: String) -> Boolean {
+    mut i = 0
+    while i < gen^.data_structs^.length {
+        let info = list_get(gen^.data_structs, i)
+        if info^.name == struct_name {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn llvm_generator_get_field_index(gen: ^LLVMGenerator, struct_name: String, prop: String) -> Int {
+    mut i = 0
+    while i < gen^.data_structs^.length {
+        let info = list_get(gen^.data_structs, i)
+        if info^.name == struct_name {
+            mut j = 0
+            while j < info^.fields^.length {
+                let f = list_get(info^.fields, j)
+                if f == prop {
+                    return j
+                }
+                j = j + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
 }
 
 fn llvm_generator_str_to_llvm_type(gen: ^LLVMGenerator, ty_str: String) -> ^LLVMType {
@@ -540,6 +615,16 @@ fn llvm_generator_type_to_llvm(gen: ^LLVMGenerator, nera_ty: ^TypeInfo) -> ^LLVM
         Unknown -> { ret^ = LLVMType.I64 }
     }
     return ret
+}
+
+fn llvm_generator_is_custom_or_choice_type(gen: ^LLVMGenerator, nera_ty: ^TypeInfo) -> Boolean {
+    when nera_ty^ {
+        Custom(s) -> { return true }
+        Pointer(inner) -> { return llvm_generator_is_custom_or_choice_type(gen, inner) }
+        Nullable(inner) -> { return llvm_generator_is_custom_or_choice_type(gen, inner) }
+        Int -> {} Float -> {} Boolean -> {} String -> {} Array(arr) -> {} Void -> {} NoneVariant -> {} Char -> {} Unknown -> {}
+    }
+    return false
 }
 
 fn llvm_generator_return_type_str_to_llvm(gen: ^LLVMGenerator, ret_type_str: String) -> ^LLVMType {
@@ -642,6 +727,7 @@ fn llvm_generator_operand_to_value(mut gen: ^LLVMGenerator, op: ^IROperand) -> ^
 fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstruction) {
     when instr^ {
         Assign(dest, src) -> {
+            puts("DEBUG LOWER: entered Assign arm")
             let src_val = llvm_generator_operand_to_value(gen, src)
             when dest^ {
                 Variable(name) -> {
@@ -690,6 +776,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             }
         }
         BinaryOp(dest, op, left, right) -> {
+            puts("DEBUG LOWER: entered BinaryOp arm")
             let l_val = llvm_generator_operand_to_value(gen, left)
             let r_val = llvm_generator_operand_to_value(gen, right)
             mut res = l_val
@@ -731,16 +818,110 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             }
             let field_key = concat_strings(raw_name, concat_strings("_", prop))
             
-            mut arr_ptr = alloc LLVMValue()
-            mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
-            if ptr_opt != None {
-                let w_val: LLVMValuePtr = ptr_opt
-                mut w = alloc LLVMValuePtr()
-                w^ = w_val
-                arr_ptr = w^.ptr
+            let is_soa = hashmap_get(gen^.function_params, field_key) != None
+            
+            mut is_custom_struct = false
+            mut struct_name = ""
+            
+            if not is_soa {
+                mut ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, raw_name)
+                if ty_opt != None {
+                    let tw_val: TypeInfoPtr = ty_opt
+                    mut tw = alloc TypeInfoPtr()
+                    tw^ = tw_val
+                    let var_ty = tw^.ptr
+                    let s_name_opt = llvm_generator_get_struct_name(gen, var_ty)
+                    if s_name_opt != None {
+                        let s_name: String = s_name_opt
+                        if llvm_generator_is_custom_struct(gen, s_name) {
+                            is_custom_struct = true
+                            struct_name = s_name
+                        }
+                    }
+                }
             }
             
-            let loaded = ir_builder_build_load(gen^.builder, arr_ptr, 8)
+            mut loaded = alloc LLVMValue()
+            if is_custom_struct {
+                let heap_ptr = llvm_generator_operand_to_value(gen, obj)
+                
+                mut i64_inner = alloc LLVMType()
+                i64_inner^ = LLVMType.I64
+                mut pi64_ty = alloc LLVMType()
+                pi64_ty^ = LLVMType.Pointer(i64_inner)
+                let casted_i64_ptr = ir_builder_build_bitcast(gen^.builder, heap_ptr, pi64_ty)
+                
+                let index = llvm_generator_get_field_index(gen, struct_name, prop)
+                mut idx_vals = new_list(1, heap_ptr)
+                mut idx_const = alloc LLVMValue()
+                idx_const^ = LLVMValue.ConstI64(index)
+                list_push(idx_vals, idx_const^)
+                let element_ptr = ir_builder_build_gep(gen^.builder, i64_inner, casted_i64_ptr, idx_vals)
+                
+                // Get field type from type environment or fallback to Int
+                mut field_ty = alloc TypeInfo()
+                field_ty^ = TypeInfo.Int
+                mut f_ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, field_key)
+                if f_ty_opt == None {
+                    f_ty_opt = hashmap_get(gen^.type_env, raw_name)
+                }
+                if f_ty_opt != None {
+                    let f_tw: TypeInfoPtr = f_ty_opt
+                    mut f_tw_alloc = alloc TypeInfoPtr()
+                    f_tw_alloc^ = f_tw
+                    field_ty = f_tw_alloc^.ptr
+                }
+                let target_llvm_ty = llvm_generator_type_to_llvm(gen, field_ty)
+                mut ptarget_ty = alloc LLVMType()
+                ptarget_ty^ = LLVMType.Pointer(target_llvm_ty)
+                let target_ptr = ir_builder_build_bitcast(gen^.builder, element_ptr, ptarget_ty)
+                
+                loaded = ir_builder_build_load(gen^.builder, target_ptr, 8)
+            } else {
+                mut arr_ptr = alloc LLVMValue()
+                mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
+                if ptr_opt == None {
+                    ptr_opt = hashmap_get(gen^.function_params, raw_name)
+                }
+                if ptr_opt != None {
+                    let w_val: LLVMValuePtr = ptr_opt
+                    mut w = alloc LLVMValuePtr()
+                    w^ = w_val
+                    arr_ptr = w^.ptr
+                }
+                
+                mut inner_ty = alloc LLVMType()
+                inner_ty^ = LLVMType.I64
+                when llvm_value_get_type(arr_ptr)^ {
+                    Pointer(inner) -> { inner_ty = inner }
+                    I1 -> {} I8 -> {} I32 -> {} I64 -> {} Double -> {} Void -> {} Array(sz, in_ty) -> {} Named(n) -> {}
+                }
+                
+                mut idx_vals = new_list(1, arr_ptr)
+                mut idx_const = alloc LLVMValue()
+                idx_const^ = LLVMValue.ConstI64(0)
+                list_push(idx_vals, idx_const^)
+                let element_ptr = ir_builder_build_gep(gen^.builder, inner_ty, arr_ptr, idx_vals)
+                
+                mut field_ty = alloc TypeInfo()
+                field_ty^ = TypeInfo.Int
+                mut f_ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, field_key)
+                if f_ty_opt == None {
+                    f_ty_opt = hashmap_get(gen^.type_env, raw_name)
+                }
+                if f_ty_opt != None {
+                    let f_tw: TypeInfoPtr = f_ty_opt
+                    mut f_tw_alloc = alloc TypeInfoPtr()
+                    f_tw_alloc^ = f_tw
+                    field_ty = f_tw_alloc^.ptr
+                }
+                let target_llvm_ty = llvm_generator_type_to_llvm(gen, field_ty)
+                mut ptarget_ty = alloc LLVMType()
+                ptarget_ty^ = LLVMType.Pointer(target_llvm_ty)
+                let casted_ptr = ir_builder_build_bitcast(gen^.builder, element_ptr, ptarget_ty)
+                
+                loaded = ir_builder_build_load(gen^.builder, casted_ptr, 8)
+            }
             when dest^ {
                 TempReg(t) -> {
                     mut vw = alloc LLVMValuePtr()
@@ -758,19 +939,100 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             }
             let field_key = concat_strings(raw_name, concat_strings("_", prop))
             
-            mut arr_ptr = alloc LLVMValue()
-            mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
-            if ptr_opt != None {
-                let w_val: LLVMValuePtr = ptr_opt
-                mut w = alloc LLVMValuePtr()
-                w^ = w_val
-                arr_ptr = w^.ptr
+            let is_soa = hashmap_get(gen^.function_params, field_key) != None
+            mut is_custom_struct = false
+            mut struct_name = ""
+            
+            if not is_soa {
+                mut ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, raw_name)
+                if ty_opt != None {
+                    let tw_val: TypeInfoPtr = ty_opt
+                    mut tw = alloc TypeInfoPtr()
+                    tw^ = tw_val
+                    let var_ty = tw^.ptr
+                    let s_name_opt = llvm_generator_get_struct_name(gen, var_ty)
+                    if s_name_opt != None {
+                        let s_name: String = s_name_opt
+                        if llvm_generator_is_custom_struct(gen, s_name) {
+                            is_custom_struct = true
+                            struct_name = s_name
+                        }
+                    }
+                }
             }
             
             let val_val = llvm_generator_operand_to_value(gen, val)
-            ir_builder_build_store(gen^.builder, val_val, arr_ptr, 8)
+            
+            if is_custom_struct {
+                let heap_ptr = llvm_generator_operand_to_value(gen, obj)
+                
+                mut i64_inner = alloc LLVMType()
+                i64_inner^ = LLVMType.I64
+                mut pi64_ty = alloc LLVMType()
+                pi64_ty^ = LLVMType.Pointer(i64_inner)
+                let casted_i64_ptr = ir_builder_build_bitcast(gen^.builder, heap_ptr, pi64_ty)
+                
+                let index = llvm_generator_get_field_index(gen, struct_name, prop)
+                mut idx_vals = new_list(1, heap_ptr)
+                mut idx_const = alloc LLVMValue()
+                idx_const^ = LLVMValue.ConstI64(index)
+                list_push(idx_vals, idx_const^)
+                let element_ptr = ir_builder_build_gep(gen^.builder, i64_inner, casted_i64_ptr, idx_vals)
+                
+                let val_ty = llvm_value_get_type(val_val)
+                mut pval_ty = alloc LLVMType()
+                pval_ty^ = LLVMType.Pointer(val_ty)
+                let target_ptr = ir_builder_build_bitcast(gen^.builder, element_ptr, pval_ty)
+                
+                ir_builder_build_store(gen^.builder, val_val, target_ptr, 8)
+            } else {
+                mut arr_ptr = alloc LLVMValue()
+                mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
+                if ptr_opt == None {
+                    ptr_opt = hashmap_get(gen^.function_params, raw_name)
+                }
+                if ptr_opt != None {
+                    let w_val: LLVMValuePtr = ptr_opt
+                    mut w = alloc LLVMValuePtr()
+                    w^ = w_val
+                    arr_ptr = w^.ptr
+                }
+                
+                mut inner_ty = alloc LLVMType()
+                inner_ty^ = LLVMType.I64
+                when llvm_value_get_type(arr_ptr)^ {
+                    Pointer(inner) -> { inner_ty = inner }
+                    I1 -> {} I8 -> {} I32 -> {} I64 -> {} Double -> {} Void -> {} Array(sz, in_ty) -> {} Named(n) -> {}
+                }
+                
+                mut idx_vals = new_list(1, arr_ptr)
+                mut idx_const = alloc LLVMValue()
+                idx_const^ = LLVMValue.ConstI64(0)
+                list_push(idx_vals, idx_const^)
+                let element_ptr = ir_builder_build_gep(gen^.builder, inner_ty, arr_ptr, idx_vals)
+                
+                mut field_ty = alloc TypeInfo()
+                field_ty^ = TypeInfo.Int
+                mut f_ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, field_key)
+                if f_ty_opt == None {
+                    f_ty_opt = hashmap_get(gen^.type_env, raw_name)
+                }
+                if f_ty_opt != None {
+                    let f_tw: TypeInfoPtr = f_ty_opt
+                    mut f_tw_alloc = alloc TypeInfoPtr()
+                    f_tw_alloc^ = f_tw
+                    field_ty = f_tw_alloc^.ptr
+                }
+                let target_llvm_ty = llvm_generator_type_to_llvm(gen, field_ty)
+                mut ptarget_ty = alloc LLVMType()
+                ptarget_ty^ = LLVMType.Pointer(target_llvm_ty)
+                let casted_ptr = ir_builder_build_bitcast(gen^.builder, element_ptr, ptarget_ty)
+                
+                ir_builder_build_store(gen^.builder, val_val, casted_ptr, 8)
+            }
         }
         Call(dest_opt, callee, args) -> {
+            puts("DEBUG LOWER: entered Call arm")
             mut callee_str = ""
             when callee^ {
                 Variable(n) -> { callee_str = n }
@@ -1354,7 +1616,38 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
         }
         LoadPointer(dest, ptr) -> {
             let ptr_val = llvm_generator_operand_to_value(gen, ptr)
-            let loaded_val = ir_builder_build_load(gen^.builder, ptr_val, 0)
+            
+            mut is_custom_or_choice = false
+            mut is_parameter = false
+            when ptr^ {
+                Variable(name) -> {
+                    is_parameter = string_set_contains(gen^.parameter_names, name)
+                    if not is_parameter {
+                        mut ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, name)
+                        if ty_opt != None {
+                            let tw_val: TypeInfoPtr = ty_opt
+                            mut tw = alloc TypeInfoPtr()
+                            tw^ = tw_val
+                            let ty = tw^.ptr
+                            when ty^ {
+                                Pointer(inner) -> {
+                                    is_custom_or_choice = llvm_generator_is_custom_or_choice_type(gen, inner)
+                                }
+                                Custom(cs) -> {
+                                    is_custom_or_choice = true
+                                }
+                                Unknown -> {} Int -> {} Float -> {} Boolean -> {} String -> {} Array(arr) -> {} Void -> {} NoneVariant -> {} Char -> {} Nullable(inner) -> {}
+                            }
+                        }
+                    }
+                }
+                TempReg(t) -> {} LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Void -> {} NoneLiteral -> {}
+            }
+            
+            mut loaded_val = ptr_val
+            if not is_custom_or_choice {
+                loaded_val = ir_builder_build_load(gen^.builder, ptr_val, 0)
+            }
             
             when dest^ {
                 Variable(name) -> {
@@ -1450,6 +1743,8 @@ fn llvm_generator_lower_function(mut gen: ^LLVMGenerator, func: ^IRFunction) {
         final_name = "nera_main"
     }
     
+    gen^.parameter_names = new_string_set()
+    
     let ret_ty = llvm_generator_return_type_str_to_llvm(gen, func^.return_type)
     
     mut dummy_param = alloc LLVMParam()
@@ -1458,6 +1753,8 @@ fn llvm_generator_lower_function(mut gen: ^LLVMGenerator, func: ^IRFunction) {
     mut p_idx = 0
     while p_idx < func^.params^.length {
         let ir_param = list_get(func^.params, p_idx)
+        string_set_add(gen^.parameter_names, ir_param.name)
+        
         mut llvm_p = alloc LLVMParam()
         
         let is_scalar = (string_contains(ir_param.name, "soa_") == false) and (string_contains(ir_param.name, "_") == false)
@@ -1501,6 +1798,7 @@ fn llvm_generator_lower_function(mut gen: ^LLVMGenerator, func: ^IRFunction) {
             let instr = list_get(block^.instrs, i)
             mut instr_ptr = alloc IRInstruction()
             instr_ptr^ = instr
+            puts(concat_strings(concat_strings("  LOWERING IR tag: ", int_to_string(get_choice_tag_ir(instr_ptr))), concat_strings(" in func: ", final_name)))
             llvm_generator_lower_instruction(gen, instr_ptr)
             i = i + 1
         }
@@ -1536,7 +1834,8 @@ fn llvm_generator_lower_function(mut gen: ^LLVMGenerator, func: ^IRFunction) {
     ir_builder_end_function(gen^.builder)
 }
 
-fn llvm_generator_generate(mut gen: ^LLVMGenerator, opt_ir: ^OptimizedIR) -> String {
+fn llvm_generator_generate(mut gen: ^LLVMGenerator, opt_ir: ^OptimizedIR, data_structs: ^List(^DataStructInfo)) -> String {
+    gen^.data_structs = data_structs
     mut f = 0
     while f < opt_ir^.functions^.length {
         let func_val = list_get(opt_ir^.functions, f)
@@ -1598,10 +1897,12 @@ fn llvm_generator_generate(mut gen: ^LLVMGenerator, opt_ir: ^OptimizedIR) -> Str
                 }
             }
             mut instr_idx = 0
+            puts(concat_strings(concat_strings("DEBUG GENERATE: Block ", blk^.name), concat_strings(" instrs length: ", int_to_string(blk^.instrs^.length))))
             while instr_idx < blk^.instrs^.length {
                 let instr = list_get(blk^.instrs, instr_idx)
                 mut instr_ptr = alloc LLVMInstruction()
                 instr_ptr^ = instr
+                puts(concat_strings(concat_strings("  INSTR (tag ", int_to_string(get_choice_tag(instr_ptr))), concat_strings("): ", llvm_instr_to_string(instr_ptr))))
                 out = concat_strings(out, concat_strings(llvm_instr_to_string(instr_ptr), "\n"))
                 instr_idx = instr_idx + 1
             }

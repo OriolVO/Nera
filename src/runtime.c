@@ -71,7 +71,9 @@ char* float_to_string(double value) {
 }
 
 char* bool_to_string(bool value) {
-    return value ? "true" : "false";
+    char* buffer = (char*)malloc(6);
+    strcpy(buffer, value ? "true" : "false");
+    return buffer;
 }
 
 bool string_starts_with(const char* s, const char* prefix) {
@@ -101,7 +103,7 @@ char* string_concat(const char* a, const char* b) {
 }
 
 char* string_substring(const char* s, long long start, long long end) {
-    if (!s) return "";
+    if (!s) return (char*)calloc(1, 1);
     long long len = strlen(s);
     if (start < 0) start = 0;
     if (end < 0 || end > len) end = len;
@@ -116,18 +118,24 @@ char* string_substring(const char* s, long long start, long long end) {
 }
 
 char* string_replace(const char* s, const char* old_str, const char* new_str) {
-    if (!s || !old_str || !new_str) return "";
+    if (!s || !old_str || !new_str) return (char*)calloc(1, 1);
     size_t old_len = strlen(old_str);
-    if (old_len == 0) return (char*)s;
+    if (old_len == 0) {
+        char* copy = (char*)malloc(strlen(s) + 1);
+        strcpy(copy, s);
+        return copy;
+    }
     size_t new_len = strlen(new_str);
     
     int count = 0;
     const char* tmp = s;
     while((tmp = strstr(tmp, old_str))) { count++; tmp += old_len; }
     
-    size_t result_len = strlen(s) + count * (new_len - old_len);
+    long long diff = (long long)new_len - (long long)old_len;
+    size_t result_len = strlen(s) + count * diff;
+
     char* result = (char*)malloc(result_len + 1);
-    if (!result) return "";
+    if (!result) return (char*)calloc(1, 1);
     
     char* out = result;
     tmp = s;
@@ -151,4 +159,40 @@ long long char_to_int(char c) {
 // Bootstrapping functions have been ported to Nera's standard library.
 bool is_null(void* ptr) {
     return ptr == NULL;
+}
+
+void* alloc_array(long long capacity, void* dummy) {
+    // 8 bytes (64-bits) per element com a norma general del compilador
+    return calloc(capacity, 8); 
+}
+
+void free_array(void* ptr) {
+    if (ptr) free(ptr);
+}
+
+void ptr_write(void** ptr, long long offset, void* val) {
+    if (ptr) ptr[offset] = val;
+}
+
+void* ptr_read(void** ptr, long long offset) {
+    return ptr ? ptr[offset] : NULL;
+}
+
+long long get_choice_tag(void* ptr) {
+    if (!ptr) return -1;
+    void* heap_ptr = *(void**)ptr;
+    if (!heap_ptr) return -2;
+    return *(long long*)heap_ptr;
+}
+
+long long get_choice_tag_ir(void* ptr) {
+    return get_choice_tag(ptr);
+}
+
+void print_address(char* name, void* ptr) {
+    printf("DEBUG: %s pointer value = %p\n", name, ptr);
+}
+
+void print_long(char* name, long long val) {
+    printf("DEBUG: %s long value = %lld\n", name, val);
 }

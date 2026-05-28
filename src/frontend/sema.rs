@@ -872,7 +872,6 @@ impl<'a> SemanticAnalyzer<'a> {
                         false
                     };
                     if !valid_null {
-                        println!("DEBUG ASSIGN MISMATCH [L{}]: left={:?} right={:?}", assignment.value.span.start_line, left_ty, right_ty);
                         self.report_error(&assignment.value.span, &format!("Type mismatch in assignment: cannot assign {} to {}", right_ty.to_string(), left_ty.to_string()));
                     }
                 }
@@ -1236,9 +1235,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         None
                     };
                     
-                    if name.contains("new_hashmap") || name.contains("alloc_spanned") {
-                        println!("DEBUG CALL CALLEE: name={}, fn_info_is_none={}", name, fn_info.is_none());
-                    }
+                    
                     if fn_info.is_none() {
                         if let Some(template_decl) = self.generic_templates.get(name).cloned() {
                             let (generic_params, params) = match &template_decl {
@@ -1255,9 +1252,6 @@ impl<'a> SemanticAnalyzer<'a> {
                                 }
                             }
                             let all_inferred = inferred_args.iter().all(|a| a.is_some());
-                            if name == "new_hashmap" || name == "alloc_spanned" {
-                                println!("DEBUG GENERIC {}: all_inferred={}, inferred_args={:?}", name, all_inferred, inferred_args);
-                            }
                             if all_inferred {
                                 let args_unwrapped: Vec<Spanned<Type>> = inferred_args.into_iter().map(|a| Spanned::new(a.unwrap(), Span { start_line: 0, start_col: 0, end_line: 0, end_col: 0 })).collect();
 
@@ -1290,7 +1284,6 @@ impl<'a> SemanticAnalyzer<'a> {
                                 let is_dod_param = arg_ty.is_array() && arg_ty.get_array_inner().as_ref() == Some(expected_ty);
                                 
                                 if arg_ty != expected_ty && !is_dod_param && *arg_ty != TypeInfo::Unknown && *expected_ty != TypeInfo::Unknown {
-                                    println!("DEBUG FUNC ARGS [L{}]: arg_ast={:?}, expected={}, found={}", func_call.arguments[i].span.start_line, func_call.arguments[i].node, expected_ty.to_string(), arg_ty.to_string());
                                     self.report_error(&func_call.arguments[i].span, &format!("Argument {} type mismatch: expected {}, found {}", i+1, expected_ty.to_string(), arg_ty.to_string()));
                                 }
                             }

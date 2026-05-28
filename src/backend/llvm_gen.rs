@@ -16,9 +16,11 @@ pub struct LLVMGenerator {
     scalar_vars: std::collections::HashSet<String>,
     global_scalar_vars: std::collections::HashSet<String>,
     adt_vars: std::collections::HashSet<String>,
+    parameter_names: std::collections::HashSet<String>,
     main_arena_ptr: Option<LLVMValue>,
     shared_vec_idx: Option<LLVMValue>,
     func_ret_types: HashMap<String, LLVMType>,
+    func_semantic_ret_types: HashMap<String, TypeInfo>,
     current_function: Option<String>,
 }
 
@@ -34,9 +36,11 @@ impl LLVMGenerator {
             scalar_vars: std::collections::HashSet::new(),
             global_scalar_vars: std::collections::HashSet::new(),
             adt_vars: std::collections::HashSet::new(),
+            parameter_names: std::collections::HashSet::new(),
             main_arena_ptr: None,
             shared_vec_idx: None,
             func_ret_types: HashMap::new(),
+            func_semantic_ret_types: HashMap::new(),
             current_function: None,
         }
     }
@@ -141,6 +145,27 @@ impl LLVMGenerator {
         self.type_to_llvm(&ret_info)
     }
 
+    fn parse_type_str(&self, type_str: &str) -> TypeInfo {
+        let mut s = type_str;
+        let is_nullable = s.starts_with('?');
+        if is_nullable { s = &s[1..]; }
+        let is_ptr = s.starts_with('^');
+        if is_ptr { s = &s[1..]; }
+        
+        let mut ret_info = match s {
+            "Int" => TypeInfo::Int,
+            "Float" => TypeInfo::Float,
+            "Boolean" => TypeInfo::Boolean,
+            "String" => TypeInfo::String,
+            "Char" => TypeInfo::Int,
+            "Void" => TypeInfo::Void,
+            _ => TypeInfo::Custom(s.to_string()),
+        };
+        if is_ptr { ret_info = TypeInfo::Pointer(Box::new(ret_info)); }
+        if is_nullable { ret_info = TypeInfo::Nullable(Box::new(ret_info)); }
+        ret_info
+    }
+
     pub fn generate(&mut self, optimized_ir: &OptimizedIR, type_env: HashMap<String, TypeInfo>) -> Result<String, CompileError> {
         self.type_env = type_env;
         self.data_structs = optimized_ir.data_structs.clone();
@@ -220,15 +245,21 @@ impl LLVMGenerator {
         self.builder.declare("declare i32 @strcmp(i8*, i8*)");
         self.builder.declare("declare i8* @string_concat(i8*, i8*)");
 
-        // Pre-populate func_ret_types from all functions
+        // Pre-populate func_ret_types and func_semantic_ret_types from all functions
         // Register both the raw Nera name and the sanitized LLVM name so
         // call-site lookups (which use the sanitized name) succeed for generics.
         self.func_ret_types.clear();
+        self.func_semantic_ret_types.clear();
         for func in &optimized_ir.functions {
             let ret_ty = self.type_str_to_llvm(&func.return_type);
+            let semantic_ret_ty = self.parse_type_str(&func.return_type);
             let sanitized = func.name.replace('(', "_").replace(')', "").replace(", ", "_").replace('^', "Ptr");
+            
             self.func_ret_types.insert(func.name.clone(), ret_ty.clone());
-            self.func_ret_types.insert(sanitized, ret_ty);
+            self.func_ret_types.insert(sanitized.clone(), ret_ty);
+            
+            self.func_semantic_ret_types.insert(func.name.clone(), semantic_ret_ty.clone());
+            self.func_semantic_ret_types.insert(sanitized, semantic_ret_ty);
         }
 
         for func in &optimized_ir.functions {
@@ -263,8 +294,10 @@ impl LLVMGenerator {
                 }
             }
         }
-        self.main_arena_ptr = None;
-        self.shared_vec_idx = None;
+        self.parameter_names.clear();
+        for (param_name, _) in &func.params {
+            self.parameter_names.insert(param_name.clone());
+        }
 
         let mut params = Vec::new();
         for (param_name, param_ty_str) in &func.params {
@@ -634,6 +667,7 @@ impl LLVMGenerator {
                     let casted_ptr = self.builder.build_bitcast(alloc_call, LLVMType::Pointer(Box::new(target_llvm_ty)));
                     if let Some(IROperand::TempReg(t)) = dest_opt {
                         self.temp_map.insert(*t, casted_ptr);
+                        self.temp_type_map.insert(*t, TypeInfo::Pointer(Box::new(target_ty)));
                     }
                 } else if callee_str.starts_with("free_array_") {
                     let ptr_val = arg_vals[0].clone();
@@ -648,14 +682,15 @@ impl LLVMGenerator {
                     let offset_val = arg_vals[1].clone();
                     
                     let type_name = callee_str.strip_prefix("ptr_read_").unwrap();
-                    let target_ty = self.get_type(type_name).unwrap_or(&TypeInfo::Int);
-                    let target_llvm_ty = self.type_to_llvm(target_ty);
+                    let target_ty = self.get_type(type_name).cloned().unwrap_or(TypeInfo::Int);
+                    let target_llvm_ty = self.type_to_llvm(&target_ty);
                     
                     let gep = self.builder.build_gep(target_llvm_ty, ptr_val, vec![offset_val]).unwrap();
                     let loaded = self.builder.build_load(gep, None).unwrap();
                     
                     if let Some(IROperand::TempReg(t)) = dest_opt {
                         self.temp_map.insert(*t, loaded);
+                        self.temp_type_map.insert(*t, target_ty.clone());
                     }
                 } else if callee_str.starts_with("ptr_write_") {
                     let ptr_val = arg_vals[0].clone();
@@ -679,6 +714,9 @@ impl LLVMGenerator {
                     let res = self.builder.build_call(ret_ty, &callee_str, arg_vals);
                     if let Some(IROperand::TempReg(t)) = dest_opt {
                         self.temp_map.insert(*t, res);
+                        if let Some(semantic_ret_ty) = self.func_semantic_ret_types.get(&callee_str) {
+                            self.temp_type_map.insert(*t, semantic_ret_ty.clone());
+                        }
                     }
                 }
             }
@@ -756,7 +794,6 @@ impl LLVMGenerator {
                 let mut struct_name = String::new();
                 if !is_soa {
                     let var_ty_opt = self.get_operand_type(obj);
-                    println!("DEBUG STOREPROPERTY: obj={:?}, prop={}, var_ty_opt={:?}", obj, prop, var_ty_opt);
                     if let Some(var_ty) = var_ty_opt {
                         if let Some(s_name) = self.get_struct_name(&var_ty) {
                             if self.data_structs.contains_key(&s_name) {
@@ -766,8 +803,6 @@ impl LLVMGenerator {
                         }
                     }
                 }
-
-                println!("DEBUG STOREPROPERTY: is_custom={}, struct_name={}", is_custom_struct, struct_name);
 
                 let val_val = self.operand_to_value(val)?;
 
@@ -1042,32 +1077,53 @@ impl LLVMGenerator {
             IRInstruction::LoadPointer(dest, ptr) => {
                 let ptr_val = self.operand_to_value(ptr)?;
                 
-                // Determine the dereferenced type
-                let mut is_custom_or_choice = false;
+                // Determine the semantic type of the pointer and the loaded value
                 let ptr_ty_opt = self.get_operand_type(ptr);
-                if let Some(ty) = &ptr_ty_opt {
-                    if let TypeInfo::Pointer(inner) = ty {
-                        is_custom_or_choice = self.is_custom_or_choice_type(inner);
+                let loaded_ty = if let Some(ty) = &ptr_ty_opt {
+                    match ty {
+                        TypeInfo::Pointer(inner) => Some((**inner).clone()),
+                        other => Some(other.clone()),
+                    }
+                } else {
+                    None
+                };
+                
+                // Determine if we are dereferencing a pointer to a custom/choice struct.
+                // A custom/choice struct is already represented as a pointer in LLVM (e.g., i64*).
+                // Dereferencing it is a no-op because operand_to_value already loads from
+                // the alloca, giving us the struct pointer — no second load is needed.
+                //
+                // We check BOTH Pointer(Custom(X)) and bare Custom(X) because the type_env
+                // is a flat HashMap and variable names reused across scopes can cause the
+                // Pointer wrapper to be lost (the later scope's type overwrites the earlier one).
+                let mut is_custom_or_choice = false;
+                let mut is_parameter = false;
+                if let IROperand::Variable(name) = ptr {
+                    if self.parameter_names.contains(name) {
+                        is_parameter = true;
                     }
                 }
                 
-                // Fallback: also check dest type — if the result is Custom/Choice,
-                // the dereference should be a no-op.
-                if !is_custom_or_choice {
-                    if let Some(ty) = self.get_operand_type(dest) {
-                        is_custom_or_choice = self.is_custom_or_choice_type(&ty);
+                if !is_parameter {
+                    if let Some(ty) = &ptr_ty_opt {
+                        match ty {
+                            TypeInfo::Pointer(inner) => {
+                                is_custom_or_choice = self.is_custom_or_choice_type(inner);
+                            }
+                            TypeInfo::Custom(_) => {
+                                is_custom_or_choice = true;
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 
                 let loaded_val = if is_custom_or_choice {
-                    // Dereferencing a pointer to a custom/choice struct (which are heap-allocated pointers)
-                    // is a no-op because the pointer value itself is the struct's address.
                     ptr_val
                 } else {
-                    // We need the target type to cast the pointer correctly
                     let mut target_llvm_ty = LLVMType::I64;
-                    if let Some(ty) = self.get_operand_type(dest) {
-                        target_llvm_ty = self.type_to_llvm(&ty);
+                    if let Some(ty) = &loaded_ty {
+                        target_llvm_ty = self.type_to_llvm(ty);
                     }
                     
                     let casted_ptr = self.builder.build_bitcast(ptr_val, LLVMType::Pointer(Box::new(target_llvm_ty)));
@@ -1082,8 +1138,8 @@ impl LLVMGenerator {
                     }
                 } else if let IROperand::TempReg(t) = dest {
                     self.temp_map.insert(*t, loaded_val.clone());
-                    if let Some(TypeInfo::Pointer(inner)) = ptr_ty_opt {
-                        self.temp_type_map.insert(*t, *inner);
+                    if let Some(ty) = loaded_ty {
+                        self.temp_type_map.insert(*t, ty);
                     }
                 }
             }
@@ -1096,11 +1152,6 @@ impl LLVMGenerator {
                 if let IROperand::Variable(name) = dest_ptr {
                     if let Some(ty) = self.get_type(name) {
                         struct_name = self.get_struct_name(ty);
-                        if name == "blk_ptr" {
-                            println!("DEBUG StorePointer blk_ptr: ty={:?}, struct_name={:?}", ty, struct_name);
-                        }
-                    } else if name == "blk_ptr" {
-                        println!("DEBUG StorePointer blk_ptr: NO TYPE FOUND IN ENV!");
                     }
                 }
 
