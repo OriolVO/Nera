@@ -200,8 +200,9 @@ fn analyzer_analyze_statement(mut analyzer: ^SemanticAnalyzer, stmt: ^Spanned(St
                         analyzer_analyze_statement(analyzer, span_if)
                     }
                     Block(b) -> {
+                        let inner_b: ^Block = b
                         mut span_b = alloc Spanned(Block)()
-                        span_b^.node = b^
+                        span_b^.node = inner_b^
                         span_b^.span = else_br^.span
                         analyzer_analyze_block(analyzer, span_b)
                     }

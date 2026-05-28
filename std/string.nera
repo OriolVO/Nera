@@ -1,5 +1,4 @@
-// String Standard Library for Nera
-// Provides FFI bindings for C standard library string functions
+use std.collections
 
 extern fn strlen(s: String) -> Int
 extern fn int_to_string(val: Int) -> String

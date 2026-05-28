@@ -11,6 +11,7 @@ pub struct LLVMGenerator {
     pub data_structs: HashMap<String, Vec<String>>,
     builder: IRBuilder,
     temp_map: HashMap<usize, LLVMValue>,
+    temp_type_map: HashMap<usize, TypeInfo>,
     function_params: HashMap<String, LLVMValue>,
     scalar_vars: std::collections::HashSet<String>,
     global_scalar_vars: std::collections::HashSet<String>,
@@ -28,6 +29,7 @@ impl LLVMGenerator {
             data_structs: HashMap::new(),
             builder: IRBuilder::new("nera_program"),
             temp_map: HashMap::new(),
+            temp_type_map: HashMap::new(),
             function_params: HashMap::new(),
             scalar_vars: std::collections::HashSet::new(),
             global_scalar_vars: std::collections::HashSet::new(),
@@ -46,6 +48,14 @@ impl LLVMGenerator {
             name.to_string()
         };
         self.type_env.get(&key).or_else(|| self.type_env.get(name))
+    }
+
+    fn get_operand_type(&self, op: &IROperand) -> Option<TypeInfo> {
+        match op {
+            IROperand::Variable(n) => self.get_type(n).cloned(),
+            IROperand::TempReg(t) => self.temp_type_map.get(t).cloned(),
+            _ => None,
+        }
     }
 
     fn get_struct_name(&self, ty: &TypeInfo) -> Option<String> {
@@ -683,8 +693,8 @@ impl LLVMGenerator {
                 let mut is_custom_struct = false;
                 let mut struct_name = String::new();
                 if !is_soa {
-                    if let Some(var_ty) = self.get_type(&raw_name) {
-                        if let Some(s_name) = self.get_struct_name(var_ty) {
+                    if let Some(var_ty) = self.get_operand_type(obj) {
+                        if let Some(s_name) = self.get_struct_name(&var_ty) {
                             if self.data_structs.contains_key(&s_name) {
                                 is_custom_struct = true;
                                 struct_name = s_name;
@@ -694,11 +704,7 @@ impl LLVMGenerator {
                 }
 
                 let loaded = if is_custom_struct {
-                    let array_ptr = self.function_params.get(&raw_name)
-                        .ok_or_else(|| CompileError::BackendError(format!("Missing struct pointer for variable '{}' in LoadProperty", raw_name)))?
-                        .clone();
-                    
-                    let heap_ptr = self.builder.build_load(array_ptr, None)?;
+                    let heap_ptr = self.operand_to_value(obj)?;
                     let casted_i64_ptr = self.builder.build_bitcast(heap_ptr, LLVMType::Pointer(Box::new(LLVMType::I64)));
                     
                     let fields = self.data_structs.get(&struct_name).unwrap();
@@ -749,8 +755,10 @@ impl LLVMGenerator {
                 let mut is_custom_struct = false;
                 let mut struct_name = String::new();
                 if !is_soa {
-                    if let Some(var_ty) = self.get_type(&raw_name) {
-                        if let Some(s_name) = self.get_struct_name(var_ty) {
+                    let var_ty_opt = self.get_operand_type(obj);
+                    println!("DEBUG STOREPROPERTY: obj={:?}, prop={}, var_ty_opt={:?}", obj, prop, var_ty_opt);
+                    if let Some(var_ty) = var_ty_opt {
+                        if let Some(s_name) = self.get_struct_name(&var_ty) {
                             if self.data_structs.contains_key(&s_name) {
                                 is_custom_struct = true;
                                 struct_name = s_name;
@@ -759,14 +767,12 @@ impl LLVMGenerator {
                     }
                 }
 
+                println!("DEBUG STOREPROPERTY: is_custom={}, struct_name={}", is_custom_struct, struct_name);
+
                 let val_val = self.operand_to_value(val)?;
 
                 if is_custom_struct {
-                    let array_ptr = self.function_params.get(&raw_name)
-                        .ok_or_else(|| CompileError::BackendError(format!("Missing struct pointer for variable '{}' in StoreProperty", raw_name)))?
-                        .clone();
-                    
-                    let heap_ptr = self.builder.build_load(array_ptr, None)?;
+                    let heap_ptr = self.operand_to_value(obj)?;
                     let casted_i64_ptr = self.builder.build_bitcast(heap_ptr, LLVMType::Pointer(Box::new(LLVMType::I64)));
                     
                     let fields = self.data_structs.get(&struct_name).unwrap();
@@ -1038,22 +1044,18 @@ impl LLVMGenerator {
                 
                 // Determine the dereferenced type
                 let mut is_custom_or_choice = false;
-                if let IROperand::Variable(name) = ptr {
-                    if let Some(ty) = self.get_type(name) {
-                        if let TypeInfo::Pointer(inner) = ty {
-                            is_custom_or_choice = self.is_custom_or_choice_type(inner);
-                        }
+                let ptr_ty_opt = self.get_operand_type(ptr);
+                if let Some(ty) = &ptr_ty_opt {
+                    if let TypeInfo::Pointer(inner) = ty {
+                        is_custom_or_choice = self.is_custom_or_choice_type(inner);
                     }
                 }
                 
                 // Fallback: also check dest type — if the result is Custom/Choice,
-                // the dereference should be a no-op. This covers cases where the source
-                // variable (e.g. from a when-match binding) lacks a type_env entry.
+                // the dereference should be a no-op.
                 if !is_custom_or_choice {
-                    if let IROperand::Variable(dest_name) = dest {
-                        if let Some(ty) = self.get_type(dest_name) {
-                            is_custom_or_choice = self.is_custom_or_choice_type(ty);
-                        }
+                    if let Some(ty) = self.get_operand_type(dest) {
+                        is_custom_or_choice = self.is_custom_or_choice_type(&ty);
                     }
                 }
                 
@@ -1064,10 +1066,8 @@ impl LLVMGenerator {
                 } else {
                     // We need the target type to cast the pointer correctly
                     let mut target_llvm_ty = LLVMType::I64;
-                    if let IROperand::Variable(name) = dest {
-                        if let Some(ty) = self.get_type(name) {
-                            target_llvm_ty = self.type_to_llvm(ty);
-                        }
+                    if let Some(ty) = self.get_operand_type(dest) {
+                        target_llvm_ty = self.type_to_llvm(&ty);
                     }
                     
                     let casted_ptr = self.builder.build_bitcast(ptr_val, LLVMType::Pointer(Box::new(target_llvm_ty)));
@@ -1078,17 +1078,54 @@ impl LLVMGenerator {
                     if let Some(dest_ptr) = self.function_params.get(name) {
                         self.builder.build_store(loaded_val.clone(), dest_ptr.clone(), None);
                     } else {
-                        self.function_params.insert(name.clone(), loaded_val);
+                        self.function_params.insert(name.clone(), loaded_val.clone());
                     }
                 } else if let IROperand::TempReg(t) = dest {
-                    self.temp_map.insert(*t, loaded_val);
+                    self.temp_map.insert(*t, loaded_val.clone());
+                    if let Some(TypeInfo::Pointer(inner)) = ptr_ty_opt {
+                        self.temp_type_map.insert(*t, *inner);
+                    }
                 }
             }
             IRInstruction::StorePointer(dest_ptr, source_val) => {
                 let ptr_val = self.operand_to_value(dest_ptr)?;
                 let val_val = self.operand_to_value(source_val)?;
-                let casted_ptr = self.builder.build_bitcast(ptr_val, LLVMType::Pointer(Box::new(val_val.get_type())));
-                self.builder.build_store(val_val, casted_ptr, None);
+
+                // If dest_ptr is a pointer to a custom struct, copy the entire struct field by field
+                let mut struct_name = None;
+                if let IROperand::Variable(name) = dest_ptr {
+                    if let Some(ty) = self.get_type(name) {
+                        struct_name = self.get_struct_name(ty);
+                        if name == "blk_ptr" {
+                            println!("DEBUG StorePointer blk_ptr: ty={:?}, struct_name={:?}", ty, struct_name);
+                        }
+                    } else if name == "blk_ptr" {
+                        println!("DEBUG StorePointer blk_ptr: NO TYPE FOUND IN ENV!");
+                    }
+                }
+
+                if let Some(s_name) = struct_name {
+                    if self.data_structs.contains_key(&s_name) {
+                        let fields = self.data_structs.get(&s_name).unwrap();
+                        let num_fields = fields.len();
+                        
+                        let src_cast = self.builder.build_bitcast(val_val, LLVMType::Pointer(Box::new(LLVMType::I64)));
+                        let dest_cast = self.builder.build_bitcast(ptr_val, LLVMType::Pointer(Box::new(LLVMType::I64)));
+                        
+                        for i in 0..num_fields {
+                            let src_field_ptr = self.builder.build_gep(LLVMType::I64, src_cast.clone(), vec![LLVMValue::ConstI64(i as i64)])?;
+                            let val = self.builder.build_load(src_field_ptr, None)?;
+                            let dest_field_ptr = self.builder.build_gep(LLVMType::I64, dest_cast.clone(), vec![LLVMValue::ConstI64(i as i64)])?;
+                            self.builder.build_store(val, dest_field_ptr, None);
+                        }
+                    } else {
+                        let casted_ptr = self.builder.build_bitcast(ptr_val, LLVMType::Pointer(Box::new(val_val.get_type())));
+                        self.builder.build_store(val_val, casted_ptr, None);
+                    }
+                } else {
+                    let casted_ptr = self.builder.build_bitcast(ptr_val, LLVMType::Pointer(Box::new(val_val.get_type())));
+                    self.builder.build_store(val_val, casted_ptr, None);
+                }
             }
             IRInstruction::ConstructADT(dest, expected_tag, args) => {
                 let size_in_bytes = (args.len() as i64 + 1) * 8;
