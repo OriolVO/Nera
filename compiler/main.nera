@@ -171,8 +171,11 @@ fn run_compiler(command: String, filename: String, program_args: ^List(String)) 
         
         mut i = 0
         while i < program^.imports^.length {
+            let d1 = puts(concat_strings("DEBUG: processing import index: ", int_to_string(i)))
             let import_span = list_get(program^.imports, i)
+            let d2 = puts("DEBUG: successfully retrieved import_span")
             let path_parts = import_span^.node.path
+            let d3 = puts("DEBUG: successfully retrieved path_parts")
             
             mut path_str = ""
             mut j = 0
@@ -224,11 +227,11 @@ fn run_compiler(command: String, filename: String, program_args: ^List(String)) 
     mut dbg_i = 0
     while dbg_i < ir_gen^.functions^.length {
         let f = list_get(ir_gen^.functions, dbg_i)
-        puts(concat_strings(concat_strings("  Function: ", f.name), concat_strings(" Blocks count: ", int_to_string(f.blocks^.length))))
+        puts(concat_strings(concat_strings("  Function: ", f^.name), concat_strings(" Blocks count: ", int_to_string(f^.blocks^.length))))
         mut dbg_b = 0
-        while dbg_b < f.blocks^.length {
-            let b = list_get(f.blocks, dbg_b)
-            puts(concat_strings(concat_strings("    Block: ", b.name), concat_strings(" Instrs count: ", int_to_string(b.instrs^.length))))
+        while dbg_b < f^.blocks^.length {
+            let b = list_get(f^.blocks, dbg_b)
+            puts(concat_strings(concat_strings("    Block: ", b^.name), concat_strings(" Instrs count: ", int_to_string(b^.instrs^.length))))
             dbg_b = dbg_b + 1
         }
         dbg_i = dbg_i + 1

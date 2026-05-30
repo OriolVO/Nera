@@ -14,12 +14,11 @@ extern fn string_replace(s: String, old_str: String, new_str: String) -> String
 extern fn char_to_int(c: Char) -> Int
 extern fn get_choice_tag(ptr: ^LLVMInstruction) -> Int
 extern fn get_choice_tag_ir(ptr: ^IRInstruction) -> Int
+extern fn get_choice_tag_operand(ptr: ^IROperand) -> Int
 
 
 
-data TypeInfoPtr { ptr: ^TypeInfo }
-data LLVMValuePtr { ptr: ^LLVMValue }
-data LLVMTypePtr { ptr: ^LLVMType }
+
 
 // ==========================================
 // IR BUILDER METHODS
@@ -28,12 +27,12 @@ fn ir_builder_new(name: String) -> ^IRBuilder {
     mut b = alloc IRBuilder()
     mut mod = alloc LLVMModule()
     mod^.name = name
-    mut dummy_fn = alloc LLVMFunction()
+    mut dummy_fn = alloc ^LLVMFunction()
     mod^.funcs = new_list(10, dummy_fn)
     mut dummy_str = alloc String()
     dummy_str^ = ""
     mod^.declarations = new_list(10, dummy_str)
-    mut dummy_gs = alloc LLVMGlobalString()
+    mut dummy_gs = alloc ^LLVMGlobalString()
     mod^.global_strings = new_list(10, dummy_gs)
     
     b^.module = mod
@@ -64,24 +63,26 @@ fn ir_builder_push_instr(mut b: ^IRBuilder, instr: LLVMInstruction) {
     mut blk_opt = b^.active_block
     if blk_opt != None {
         mut blk: ^LLVMBasicBlock = blk_opt
-        mut instr_ptr = alloc LLVMInstruction()
-        instr_ptr^ = instr
+        mut instr_ptr = alloc ^LLVMInstruction()
+        mut real_instr = alloc LLVMInstruction()
+        real_instr^ = instr
+        instr_ptr^ = real_instr
         puts(concat_strings("DEBUG BUILDER: pushing instr to block: ", blk^.name))
-        list_push(blk^.instrs, instr)
+        list_push(blk^.instrs, real_instr)
     } else {
         puts("DEBUG BUILDER: active_block is NONE when pushing instruction!")
     }
 }
 
-fn ir_builder_start_function(mut b: ^IRBuilder, name: String, ret_ty: ^LLVMType, params: ^List(LLVMParam)) {
+fn ir_builder_start_function(mut b: ^IRBuilder, name: String, ret_ty: ^LLVMType, params: ^List(^LLVMParam)) {
     b^.reg_count = 1
     mut func = alloc LLVMFunction()
     func^.name = name
     func^.ret_ty = ret_ty
     func^.params = params
-    mut dummy_blk = alloc LLVMBasicBlock()
+    mut dummy_blk = alloc ^LLVMBasicBlock()
     func^.blocks = new_list(10, dummy_blk)
-    mut dummy_instr = alloc LLVMInstruction()
+    mut dummy_instr = alloc ^LLVMInstruction()
     func^.allocas = new_list(10, dummy_instr)
     b^.active_func = func
 }
@@ -94,7 +95,7 @@ fn ir_builder_end_function(mut b: ^IRBuilder) {
         if fn_opt != None {
             mut func: ^LLVMFunction = fn_opt
             puts(concat_strings(concat_strings("DEBUG BUILDER: end_function pushing block ", blk^.name), concat_strings(" to func: ", func^.name)))
-            list_push(func^.blocks, blk^)
+            list_push(func^.blocks, blk)
         }
         b^.active_block = None
     }
@@ -102,7 +103,7 @@ fn ir_builder_end_function(mut b: ^IRBuilder) {
     if fn_opt2 != None {
         let func2: ^LLVMFunction = fn_opt2
         puts(concat_strings("DEBUG BUILDER: end_function pushing func: ", func2^.name))
-        list_push(b^.module^.funcs, func2^)
+        list_push(b^.module^.funcs, func2)
         b^.active_func = None
     }
 }
@@ -116,14 +117,16 @@ fn ir_builder_start_block(mut b: ^IRBuilder, name: String) {
         if fn_opt != None {
             mut func: ^LLVMFunction = fn_opt
             puts(concat_strings(concat_strings("DEBUG BUILDER: start_block pushing previous block ", blk^.name), concat_strings(" to func: ", func^.name)))
-            list_push(func^.blocks, blk^)
+            list_push(func^.blocks, blk)
         }
     }
-    mut new_blk = alloc LLVMBasicBlock()
-    new_blk^.name = name
-    mut dummy_instr = alloc LLVMInstruction()
-    new_blk^.instrs = new_list(10, dummy_instr)
-    b^.active_block = new_blk
+    mut new_blk = alloc ^LLVMBasicBlock()
+    mut real_blk = alloc LLVMBasicBlock()
+    real_blk^.name = name
+    mut dummy_instr = alloc ^LLVMInstruction()
+    real_blk^.instrs = new_list(10, dummy_instr)
+    new_blk^ = real_blk
+    b^.active_block = real_blk
 }
 
 fn ir_builder_current_block_name(b: ^IRBuilder) -> String {
@@ -139,7 +142,9 @@ fn ir_builder_build_alloca(mut b: ^IRBuilder, name: String, ty: ^LLVMType) -> ^L
     mut fn_opt = b^.active_func
     if fn_opt != None {
         mut func: ^LLVMFunction = fn_opt
-        list_push(func^.allocas, LLVMInstruction.Alloca(name, ty))
+        mut alloca_ptr = alloc LLVMInstruction()
+        alloca_ptr^ = LLVMInstruction.Alloca(name, ty)
+        list_push(func^.allocas, alloca_ptr)
     }
     mut v = alloc LLVMValue()
     mut ty_ptr = alloc LLVMType()
@@ -169,7 +174,7 @@ fn ir_builder_build_store(mut b: ^IRBuilder, val: ^LLVMValue, ptr: ^LLVMValue, a
     ir_builder_push_instr(b, LLVMInstruction.Store(val, ptr, align))
 }
 
-fn ir_builder_build_gep(mut b: ^IRBuilder, base_ty: ^LLVMType, ptr: ^LLVMValue, indices: ^List(LLVMValue)) -> ^LLVMValue {
+fn ir_builder_build_gep(mut b: ^IRBuilder, base_ty: ^LLVMType, ptr: ^LLVMValue, indices: ^List(^LLVMValue)) -> ^LLVMValue {
     let dest = ir_builder_next_reg_name(b)
     mut raw_ptr = alloc LLVMValue()
     raw_ptr^ = ptr^
@@ -385,7 +390,7 @@ fn ir_builder_build_bitcast(mut b: ^IRBuilder, val: ^LLVMValue, dest_ty: ^LLVMTy
     return v
 }
 
-fn ir_builder_build_call(mut b: ^IRBuilder, ret_ty: ^LLVMType, name: String, args: ^List(LLVMValue)) -> ^LLVMValue {
+fn ir_builder_build_call(mut b: ^IRBuilder, ret_ty: ^LLVMType, name: String, args: ^List(^LLVMValue)) -> ^LLVMValue {
     mut dest_opt: ?String = None
     mut v = alloc LLVMValue()
     when ret_ty^ {
@@ -450,7 +455,7 @@ fn ir_builder_build_global_string_ptr(mut b: ^IRBuilder, value: String) -> ^LLVM
     gs^.name = name
     gs^.val = value
     gs^.len = len
-    list_push(b^.module^.global_strings, gs^)
+    list_push(b^.module^.global_strings, gs)
     mut v = alloc LLVMValue()
     v^ = LLVMValue.ConstGlobalStringPtr(name, len)
     return v
@@ -466,15 +471,15 @@ data DataStructInfo {
 }
 
 data LLVMGenerator {
-    type_env: ^HashMap(TypeInfoPtr)
+    type_env: ^HashMap(^TypeInfo)
     builder: ^IRBuilder
-    temp_map: ^HashMap(LLVMValuePtr)
-    function_params: ^HashMap(LLVMValuePtr)
+    temp_map: ^HashMap(^LLVMValue)
+    function_params: ^HashMap(^LLVMValue)
     scalar_vars: ^StringSet
     parameter_names: ^StringSet
     main_arena_ptr: ?^LLVMValue
     shared_vec_idx: ?^LLVMValue
-    func_ret_types: ^HashMap(LLVMTypePtr)
+    func_ret_types: ^HashMap(^LLVMType)
     actual_soa_arrays: ^List(SoAArray)
     data_structs: ^List(^DataStructInfo)
 }
@@ -482,12 +487,12 @@ data LLVMGenerator {
 fn llvm_generator_new() -> ^LLVMGenerator {
     mut gen = alloc LLVMGenerator()
     
-    mut dummy_tip = alloc TypeInfoPtr()
+    mut dummy_tip = alloc ^TypeInfo()
     gen^.type_env = new_hashmap(dummy_tip)
     
     gen^.builder = ir_builder_new("nera_program")
     
-    mut dummy_lvp = alloc LLVMValuePtr()
+    mut dummy_lvp = alloc ^LLVMValue()
     gen^.temp_map = new_hashmap(dummy_lvp)
     gen^.function_params = new_hashmap(dummy_lvp)
     
@@ -496,7 +501,7 @@ fn llvm_generator_new() -> ^LLVMGenerator {
     gen^.main_arena_ptr = None
     gen^.shared_vec_idx = None
     
-    mut dummy_ltp = alloc LLVMTypePtr()
+    mut dummy_ltp = alloc ^LLVMType()
     gen^.func_ret_types = new_hashmap(dummy_ltp)
     
     mut dummy_soa = alloc SoAArray()
@@ -627,6 +632,16 @@ fn llvm_generator_is_custom_or_choice_type(gen: ^LLVMGenerator, nera_ty: ^TypeIn
     return false
 }
 
+fn llvm_generator_is_scalar_type(gen: ^LLVMGenerator, nera_ty: ^TypeInfo) -> Boolean {
+    when nera_ty^ {
+        Void -> { return false }
+        NoneVariant -> { return false }
+        Int -> {} Float -> {} Boolean -> {} String -> {} Array(arr) -> {} Char -> {} Unknown -> {} Custom(s) -> {} Pointer(inner) -> {} Nullable(inner) -> {}
+    }
+    return true
+}
+
+
 fn llvm_generator_return_type_str_to_llvm(gen: ^LLVMGenerator, ret_type_str: String) -> ^LLVMType {
     mut s = ret_type_str
     let is_nullable = string_starts_with(s, "?")
@@ -669,13 +684,17 @@ fn llvm_generator_operand_to_value(mut gen: ^LLVMGenerator, op: ^IROperand) -> ^
         }
         LiteralBool(v) -> { ret^ = LLVMValue.ConstI1(v) }
         Variable(name) -> {
-            mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, name)
+            mut ptr_opt: ?^LLVMValue = hashmap_get(gen^.function_params, name)
             if ptr_opt != None {
-                let ptr_wrap_val: LLVMValuePtr = ptr_opt
-                mut ptr_wrap = alloc LLVMValuePtr()
-                ptr_wrap^ = ptr_wrap_val
-                let ptr = ptr_wrap^.ptr
-                let is_scalar = string_set_contains(gen^.scalar_vars, name) or string_starts_with(name, "param_")
+                let ptr: ^LLVMValue = ptr_opt
+                mut is_scalar = string_starts_with(name, "param_")
+                if not is_scalar {
+                    mut ty_opt: ?^TypeInfo = hashmap_get(gen^.type_env, name)
+                    if ty_opt != None {
+                        is_scalar = llvm_generator_is_scalar_type(gen, ty_opt)
+                    }
+                }
+                is_scalar = is_scalar or string_set_contains(gen^.scalar_vars, name)
                 if is_scalar {
                     ret = ir_builder_build_load(gen^.builder, ptr, 0)
                 } else {
@@ -684,24 +703,18 @@ fn llvm_generator_operand_to_value(mut gen: ^LLVMGenerator, op: ^IROperand) -> ^
             } else {
                 mut ty = alloc TypeInfo()
                 ty^ = TypeInfo.Int
-                mut ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, name)
+                mut ty_opt: ?^TypeInfo = hashmap_get(gen^.type_env, name)
                 if ty_opt != None {
-                    let tw_val: TypeInfoPtr = ty_opt
-                    mut tw = alloc TypeInfoPtr()
-                    tw^ = tw_val
-                    ty = tw^.ptr
+                    ty = ty_opt
                 }
                 ret^ = LLVMValue.Reg(name, llvm_generator_type_to_llvm(gen, ty))
             }
         }
         TempReg(t) -> {
             let t_name = int_to_string(t)
-            mut v_opt: ?LLVMValuePtr = hashmap_get(gen^.temp_map, t_name)
+            mut v_opt: ?^LLVMValue = hashmap_get(gen^.temp_map, t_name)
             if v_opt != None {
-                let vw_val: LLVMValuePtr = v_opt
-                mut vw = alloc LLVMValuePtr()
-                vw^ = vw_val
-                ret = vw^.ptr
+                ret = v_opt
             } else {
                 mut lty = alloc LLVMType()
                 lty^ = LLVMType.I64
@@ -731,22 +744,16 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             let src_val = llvm_generator_operand_to_value(gen, src)
             when dest^ {
                 Variable(name) -> {
-                    mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, name)
+                    mut ptr_opt: ?^LLVMValue = hashmap_get(gen^.function_params, name)
                     if ptr_opt != None {
-                        let ptr_wrap_val: LLVMValuePtr = ptr_opt
-                        mut ptr_wrap = alloc LLVMValuePtr()
-                        ptr_wrap^ = ptr_wrap_val
-                        ir_builder_build_store(gen^.builder, src_val, ptr_wrap^.ptr, 0)
+                        let ptr: ^LLVMValue = ptr_opt
+                        ir_builder_build_store(gen^.builder, src_val, ptr, 0)
                     } else {
-                        mut vw = alloc LLVMValuePtr()
-                        vw^.ptr = src_val
-                        hashmap_put(gen^.function_params, name, vw^)
+                        hashmap_put(gen^.function_params, name, src_val)
                     }
                 }
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = src_val
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), src_val)
                 }
                 LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -768,9 +775,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             }
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = res
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), res)
                 }
                 LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -803,9 +808,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             }
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = res
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), res)
                 }
                 LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -824,12 +827,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             mut struct_name = ""
             
             if not is_soa {
-                mut ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, raw_name)
+                mut ty_opt: ?^TypeInfo = hashmap_get(gen^.type_env, raw_name)
                 if ty_opt != None {
-                    let tw_val: TypeInfoPtr = ty_opt
-                    mut tw = alloc TypeInfoPtr()
-                    tw^ = tw_val
-                    let var_ty = tw^.ptr
+                    let var_ty: ^TypeInfo = ty_opt
                     let s_name_opt = llvm_generator_get_struct_name(gen, var_ty)
                     if s_name_opt != None {
                         let s_name: String = s_name_opt
@@ -852,24 +852,23 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
                 let casted_i64_ptr = ir_builder_build_bitcast(gen^.builder, heap_ptr, pi64_ty)
                 
                 let index = llvm_generator_get_field_index(gen, struct_name, prop)
-                mut idx_vals = new_list(1, heap_ptr)
                 mut idx_const = alloc LLVMValue()
                 idx_const^ = LLVMValue.ConstI64(index)
-                list_push(idx_vals, idx_const^)
+                mut dummy_lv = alloc ^LLVMValue()
+                mut idx_vals = new_list(1, dummy_lv)
+                list_push(idx_vals, idx_const)
                 let element_ptr = ir_builder_build_gep(gen^.builder, i64_inner, casted_i64_ptr, idx_vals)
                 
                 // Get field type from type environment or fallback to Int
                 mut field_ty = alloc TypeInfo()
                 field_ty^ = TypeInfo.Int
-                mut f_ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, field_key)
+                mut f_ty_opt: ?^TypeInfo = hashmap_get(gen^.type_env, field_key)
                 if f_ty_opt == None {
                     f_ty_opt = hashmap_get(gen^.type_env, raw_name)
                 }
                 if f_ty_opt != None {
-                    let f_tw: TypeInfoPtr = f_ty_opt
-                    mut f_tw_alloc = alloc TypeInfoPtr()
-                    f_tw_alloc^ = f_tw
-                    field_ty = f_tw_alloc^.ptr
+                    let ptr: ^TypeInfo = f_ty_opt
+                    field_ty = ptr
                 }
                 let target_llvm_ty = llvm_generator_type_to_llvm(gen, field_ty)
                 mut ptarget_ty = alloc LLVMType()
@@ -879,15 +878,15 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
                 loaded = ir_builder_build_load(gen^.builder, target_ptr, 8)
             } else {
                 mut arr_ptr = alloc LLVMValue()
-                mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
+                mut ptr_opt: ?^LLVMValue = hashmap_get(gen^.function_params, field_key)
                 if ptr_opt == None {
                     ptr_opt = hashmap_get(gen^.function_params, raw_name)
                 }
                 if ptr_opt != None {
-                    let w_val: LLVMValuePtr = ptr_opt
-                    mut w = alloc LLVMValuePtr()
-                    w^ = w_val
-                    arr_ptr = w^.ptr
+                    let ptr: ^LLVMValue = ptr_opt
+                    arr_ptr = ptr
+                } else {
+                    arr_ptr = llvm_generator_operand_to_value(gen, obj)
                 }
                 
                 mut inner_ty = alloc LLVMType()
@@ -897,23 +896,22 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
                     I1 -> {} I8 -> {} I32 -> {} I64 -> {} Double -> {} Void -> {} Array(sz, in_ty) -> {} Named(n) -> {}
                 }
                 
-                mut idx_vals = new_list(1, arr_ptr)
                 mut idx_const = alloc LLVMValue()
                 idx_const^ = LLVMValue.ConstI64(0)
-                list_push(idx_vals, idx_const^)
+                mut dummy_lv = alloc ^LLVMValue()
+                mut idx_vals = new_list(1, dummy_lv)
+                list_push(idx_vals, idx_const)
                 let element_ptr = ir_builder_build_gep(gen^.builder, inner_ty, arr_ptr, idx_vals)
                 
                 mut field_ty = alloc TypeInfo()
                 field_ty^ = TypeInfo.Int
-                mut f_ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, field_key)
+                mut f_ty_opt: ?^TypeInfo = hashmap_get(gen^.type_env, field_key)
                 if f_ty_opt == None {
                     f_ty_opt = hashmap_get(gen^.type_env, raw_name)
                 }
                 if f_ty_opt != None {
-                    let f_tw: TypeInfoPtr = f_ty_opt
-                    mut f_tw_alloc = alloc TypeInfoPtr()
-                    f_tw_alloc^ = f_tw
-                    field_ty = f_tw_alloc^.ptr
+                    let ptr: ^TypeInfo = f_ty_opt
+                    field_ty = ptr
                 }
                 let target_llvm_ty = llvm_generator_type_to_llvm(gen, field_ty)
                 mut ptarget_ty = alloc LLVMType()
@@ -924,9 +922,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             }
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = loaded
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), loaded)
                 }
                 LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -934,8 +930,11 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
         StoreProperty(obj, prop, val) -> {
             mut raw_name = ""
             when obj^ {
-                Variable(n) -> { raw_name = n }
-                LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} TempReg(t) -> {} Void -> {} NoneLiteral -> {}
+                Variable(n) -> {
+                    raw_name = n
+                    puts(concat_strings("IS VAR: ", n))
+                }
+                LiteralInt(i) -> { puts("IS INT") } LiteralFloat(f) -> { puts("IS FLOAT") } LiteralString(s) -> { puts("IS STR") } LiteralChar(c) -> { puts("IS CHAR") } LiteralBool(b) -> { puts("IS BOOL") } TempReg(t) -> { puts("IS TEMP") } Void -> { puts("IS VOID") } NoneLiteral -> { puts("IS NONE") }
             }
             let field_key = concat_strings(raw_name, concat_strings("_", prop))
             
@@ -944,12 +943,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             mut struct_name = ""
             
             if not is_soa {
-                mut ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, raw_name)
+                mut ty_opt: ?^TypeInfo = hashmap_get(gen^.type_env, raw_name)
                 if ty_opt != None {
-                    let tw_val: TypeInfoPtr = ty_opt
-                    mut tw = alloc TypeInfoPtr()
-                    tw^ = tw_val
-                    let var_ty = tw^.ptr
+                    let var_ty: ^TypeInfo = ty_opt
                     let s_name_opt = llvm_generator_get_struct_name(gen, var_ty)
                     if s_name_opt != None {
                         let s_name: String = s_name_opt
@@ -973,10 +969,11 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
                 let casted_i64_ptr = ir_builder_build_bitcast(gen^.builder, heap_ptr, pi64_ty)
                 
                 let index = llvm_generator_get_field_index(gen, struct_name, prop)
-                mut idx_vals = new_list(1, heap_ptr)
                 mut idx_const = alloc LLVMValue()
                 idx_const^ = LLVMValue.ConstI64(index)
-                list_push(idx_vals, idx_const^)
+                mut dummy_lv = alloc ^LLVMValue()
+                mut idx_vals = new_list(1, dummy_lv)
+                list_push(idx_vals, idx_const)
                 let element_ptr = ir_builder_build_gep(gen^.builder, i64_inner, casted_i64_ptr, idx_vals)
                 
                 let val_ty = llvm_value_get_type(val_val)
@@ -987,15 +984,15 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
                 ir_builder_build_store(gen^.builder, val_val, target_ptr, 8)
             } else {
                 mut arr_ptr = alloc LLVMValue()
-                mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
+                mut ptr_opt: ?^LLVMValue = hashmap_get(gen^.function_params, field_key)
                 if ptr_opt == None {
                     ptr_opt = hashmap_get(gen^.function_params, raw_name)
                 }
                 if ptr_opt != None {
-                    let w_val: LLVMValuePtr = ptr_opt
-                    mut w = alloc LLVMValuePtr()
-                    w^ = w_val
-                    arr_ptr = w^.ptr
+                    let ptr: ^LLVMValue = ptr_opt
+                    arr_ptr = ptr
+                } else {
+                    arr_ptr = llvm_generator_operand_to_value(gen, obj)
                 }
                 
                 mut inner_ty = alloc LLVMType()
@@ -1005,23 +1002,22 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
                     I1 -> {} I8 -> {} I32 -> {} I64 -> {} Double -> {} Void -> {} Array(sz, in_ty) -> {} Named(n) -> {}
                 }
                 
-                mut idx_vals = new_list(1, arr_ptr)
                 mut idx_const = alloc LLVMValue()
                 idx_const^ = LLVMValue.ConstI64(0)
-                list_push(idx_vals, idx_const^)
+                mut dummy_lv = alloc ^LLVMValue()
+                mut idx_vals = new_list(1, dummy_lv)
+                list_push(idx_vals, idx_const)
                 let element_ptr = ir_builder_build_gep(gen^.builder, inner_ty, arr_ptr, idx_vals)
                 
                 mut field_ty = alloc TypeInfo()
                 field_ty^ = TypeInfo.Int
-                mut f_ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, field_key)
+                mut f_ty_opt: ?^TypeInfo = hashmap_get(gen^.type_env, field_key)
                 if f_ty_opt == None {
                     f_ty_opt = hashmap_get(gen^.type_env, raw_name)
                 }
                 if f_ty_opt != None {
-                    let f_tw: TypeInfoPtr = f_ty_opt
-                    mut f_tw_alloc = alloc TypeInfoPtr()
-                    f_tw_alloc^ = f_tw
-                    field_ty = f_tw_alloc^.ptr
+                    let ptr: ^TypeInfo = f_ty_opt
+                    field_ty = ptr
                 }
                 let target_llvm_ty = llvm_generator_type_to_llvm(gen, field_ty)
                 mut ptarget_ty = alloc LLVMType()
@@ -1032,26 +1028,36 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             }
         }
         Call(dest_opt, callee, args) -> {
-            puts("DEBUG LOWER: entered Call arm")
+            let d1 = puts("DEBUG LOWER: entered Call arm")
+            let callee_tag = get_choice_tag_operand(callee)
+            let d0 = puts(concat_strings("DEBUG: callee choice tag = ", int_to_string(callee_tag)))
             mut callee_str = ""
             when callee^ {
-                Variable(n) -> { callee_str = n }
-                LiteralInt(i) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} TempReg(t) -> {} Void -> {} NoneLiteral -> {}
+                Variable(n) -> {
+                    let d2 = puts(concat_strings("DEBUG: callee is Variable: ", n))
+                    callee_str = n
+                }
+                LiteralInt(i) -> { let d3 = puts("DEBUG: callee is LiteralInt") }
+                LiteralFloat(f) -> { let d4 = puts("DEBUG: callee is LiteralFloat") }
+                LiteralString(s) -> { let d5 = puts("DEBUG: callee is LiteralString") }
+                LiteralChar(c) -> { let d6 = puts("DEBUG: callee is LiteralChar") }
+                LiteralBool(b) -> { let d7 = puts("DEBUG: callee is LiteralBool") }
+                TempReg(t) -> { let d8 = puts(concat_strings("DEBUG: callee is TempReg: ", int_to_string(t))) }
+                Void -> { let d9 = puts("DEBUG: callee is Void") }
+                NoneLiteral -> { let d10 = puts("DEBUG: callee is NoneLiteral") }
             }
             callee_str = string_replace(callee_str, "(", "_")
             callee_str = string_replace(callee_str, ")", "")
             callee_str = string_replace(callee_str, ", ", "_")
             callee_str = string_replace(callee_str, "^", "Ptr")
             
-            mut dummy_val = alloc LLVMValue()
+            mut dummy_val = alloc ^LLVMValue()
             mut arg_vals = new_list(10, dummy_val)
             mut i = 0
             while i < args^.length {
                 let a_ptr = list_get(args, i)
-                mut a = alloc IROperand()
-                a^ = a_ptr
-                let a_val = llvm_generator_operand_to_value(gen, a)
-                list_push(arg_vals, a_val^)
+                let a_val = llvm_generator_operand_to_value(gen, a_ptr)
+                list_push(arg_vals, a_val)
                 i = i + 1
             }
             
@@ -1065,9 +1071,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
                 let d: ^IROperand = dest_opt
                 when d^ {
                     TempReg(t) -> {
-                        mut vw = alloc LLVMValuePtr()
-                        vw^.ptr = res
-                        hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                        hashmap_put(gen^.temp_map, int_to_string(t), res)
                     }
                     LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
                 }
@@ -1078,9 +1082,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             mut idx_val = alloc LLVMValue()
             idx_val^ = LLVMValue.ConstI64(0)
-            mut dummy_lv = alloc LLVMValue()
+            mut dummy_lv = alloc ^LLVMValue()
             mut idx_list = new_list(1, dummy_lv)
-            list_push(idx_list, idx_val^)
+            list_push(idx_list, idx_val)
             
             mut i64_ty = alloc LLVMType()
             i64_ty^ = LLVMType.I64
@@ -1093,21 +1097,15 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = tag_val
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), tag_val)
                 }
                 Variable(name) -> {
-                    mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, name)
+                    mut ptr_opt: ?^LLVMValue = hashmap_get(gen^.function_params, name)
                     if ptr_opt != None {
-                        let ptr_wrap_val: LLVMValuePtr = ptr_opt
-                        mut ptr_wrap = alloc LLVMValuePtr()
-                        ptr_wrap^ = ptr_wrap_val
-                        ir_builder_build_store(gen^.builder, tag_val, ptr_wrap^.ptr, 0)
+                        let ptr: ^LLVMValue = ptr_opt
+                        ir_builder_build_store(gen^.builder, tag_val, ptr, 0)
                     } else {
-                        mut vw = alloc LLVMValuePtr()
-                        vw^.ptr = tag_val
-                        hashmap_put(gen^.function_params, name, vw^)
+                        hashmap_put(gen^.function_params, name, tag_val)
                     }
                 }
                 LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Void -> {} NoneLiteral -> {}
@@ -1116,9 +1114,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
         Alloc(dest, ty_name, size) -> {
             mut size_val = alloc LLVMValue()
             size_val^ = LLVMValue.ConstI64(size)
-            mut dummy_lv = alloc LLVMValue()
+            mut dummy_lv = alloc ^LLVMValue()
             mut arg_list = new_list(1, dummy_lv)
-            list_push(arg_list, size_val^)
+            list_push(arg_list, size_val)
             
             mut i8_ptr = alloc LLVMType()
             mut i8_inner = alloc LLVMType()
@@ -1129,9 +1127,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = alloc_call
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), alloc_call)
                 }
                 LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -1144,9 +1140,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             i8_ptr^ = LLVMType.Pointer(i8_inner)
             let void_ptr = ir_builder_build_bitcast(gen^.builder, ptr_val, i8_ptr)
             
-            mut dummy_lv = alloc LLVMValue()
+            mut dummy_lv = alloc ^LLVMValue()
             mut arg_list = new_list(1, dummy_lv)
-            list_push(arg_list, void_ptr^)
+            list_push(arg_list, void_ptr)
             mut vty = alloc LLVMType()
             vty^ = LLVMType.Void
             let ignore = ir_builder_build_call(gen^.builder, vty, "free", arg_list)
@@ -1158,21 +1154,19 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             mut idx_val = alloc LLVMValue()
             idx_val^ = LLVMValue.ConstI64(offset)
-            mut dummy_lv = alloc LLVMValue()
+            mut dummy_lv = alloc ^LLVMValue()
             mut idx_list = new_list(1, dummy_lv)
-            list_push(idx_list, idx_val^)
+            list_push(idx_list, idx_val)
             
             mut target_llvm_ty = alloc LLVMType()
             target_llvm_ty^ = LLVMType.I64
             
             when dest^ {
                 Variable(name) -> {
-                    mut ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, name)
+                    mut ty_opt: ?^TypeInfo = hashmap_get(gen^.type_env, name)
                     if ty_opt != None {
-                        let tw_val: TypeInfoPtr = ty_opt
-                        mut tw = alloc TypeInfoPtr()
-                        tw^ = tw_val
-                        target_llvm_ty = llvm_generator_type_to_llvm(gen, tw^.ptr)
+                        let ty: ^TypeInfo = ty_opt
+                        target_llvm_ty = llvm_generator_type_to_llvm(gen, ty)
                     }
                 }
                 TempReg(t) -> {} LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Void -> {} NoneLiteral -> {}
@@ -1194,31 +1188,24 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = loaded_val
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), loaded_val)
                 }
                 Variable(name) -> {
-                    mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, name)
+                    mut ptr_opt: ?^LLVMValue = hashmap_get(gen^.function_params, name)
                     if ptr_opt != None {
-                        let ptr_wrap_val: LLVMValuePtr = ptr_opt
-                        mut ptr_wrap = alloc LLVMValuePtr()
-                        ptr_wrap^ = ptr_wrap_val
+                        let ptr: ^LLVMValue = ptr_opt
                         
-                        let dest_ptr_ty = llvm_value_get_type(ptr_wrap^.ptr)
                         let payload_val_ty = llvm_value_get_type(loaded_val)
                         mut p_payload_val_ty = alloc LLVMType()
                         p_payload_val_ty^ = LLVMType.Pointer(payload_val_ty)
-                        let target_ptr = ir_builder_build_bitcast(gen^.builder, ptr_wrap^.ptr, p_payload_val_ty)
+                        let target_ptr = ir_builder_build_bitcast(gen^.builder, ptr, p_payload_val_ty)
                         
                         ir_builder_build_store(gen^.builder, loaded_val, target_ptr, 0)
                     } else {
                         mut alloca_ptr = ir_builder_build_alloca(gen^.builder, concat_strings("ptr_", name), target_llvm_ty)
                         ir_builder_build_store(gen^.builder, loaded_val, alloca_ptr, 0)
                         
-                        mut vw = alloc LLVMValuePtr()
-                        vw^.ptr = alloca_ptr
-                        hashmap_put(gen^.function_params, name, vw^)
+                        hashmap_put(gen^.function_params, name, alloca_ptr)
                         string_set_add(gen^.scalar_vars, name)
                     }
                 }
@@ -1230,9 +1217,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             mut size_val = alloc LLVMValue()
             size_val^ = LLVMValue.ConstI64(total_size)
-            mut dummy_lv = alloc LLVMValue()
+            mut dummy_lv = alloc ^LLVMValue()
             mut malloc_args = new_list(1, dummy_lv)
-            list_push(malloc_args, size_val^)
+            list_push(malloc_args, size_val)
             
             mut i8_inner = alloc LLVMType()
             i8_inner^ = LLVMType.I8
@@ -1255,15 +1242,13 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             mut i = 0
             while i < args^.length {
                 let arg_op = list_get(args, i)
-                mut arg_op_ptr = alloc IROperand()
-                arg_op_ptr^ = arg_op
-                let arg_val = llvm_generator_operand_to_value(gen, arg_op_ptr)
+                let arg_val = llvm_generator_operand_to_value(gen, arg_op)
                 
                 let current_offset = 8 + (i * 8)
                 mut off_val = alloc LLVMValue()
                 off_val^ = LLVMValue.ConstI64(current_offset)
                 mut idx_list = new_list(1, dummy_lv)
-                list_push(idx_list, off_val^)
+                list_push(idx_list, off_val)
                 
                 let field_ptr = ir_builder_build_gep(gen^.builder, i8_inner, struct_ptr, idx_list)
                 
@@ -1279,9 +1264,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = struct_ptr
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), struct_ptr)
                 }
                 LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -1291,9 +1274,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             mut idx_val = alloc LLVMValue()
             idx_val^ = LLVMValue.ConstI64(field_idx)
-            mut dummy_lv = alloc LLVMValue()
+            mut dummy_lv = alloc ^LLVMValue()
             mut idx_list = new_list(1, dummy_lv)
-            list_push(idx_list, idx_val^)
+            list_push(idx_list, idx_val)
             
             mut i64_ty = alloc LLVMType()
             i64_ty^ = LLVMType.I64
@@ -1312,9 +1295,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = loaded_val
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), loaded_val)
                 }
                 LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -1325,9 +1306,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             mut idx_val = alloc LLVMValue()
             idx_val^ = LLVMValue.ConstI64(field_idx)
-            mut dummy_lv = alloc LLVMValue()
+            mut dummy_lv = alloc ^LLVMValue()
             mut idx_list = new_list(1, dummy_lv)
-            list_push(idx_list, idx_val^)
+            list_push(idx_list, idx_val)
             
             mut i64_ty = alloc LLVMType()
             i64_ty^ = LLVMType.I64
@@ -1349,12 +1330,13 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             let field_key = concat_strings(arr_name, concat_strings("_", prop_name))
             
             mut arr_ptr = alloc LLVMValue()
-            mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
+            mut ptr_opt: ?^LLVMValue = hashmap_get(gen^.function_params, field_key)
+            if ptr_opt == None {
+                ptr_opt = hashmap_get(gen^.function_params, arr_name)
+            }
             if ptr_opt != None {
-                let w_val: LLVMValuePtr = ptr_opt
-                mut w = alloc LLVMValuePtr()
-                w^ = w_val
-                arr_ptr = w^.ptr
+                    let ptr: ^LLVMValue = ptr_opt
+                    arr_ptr = ptr
             }
             let base_ptr = ir_builder_build_load(gen^.builder, arr_ptr, 8)
             
@@ -1363,9 +1345,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             eight^ = LLVMValue.ConstI64(8)
             byte_idx = ir_builder_build_mul(gen^.builder, idx_val, eight)
             
-            mut dummy_lv = alloc LLVMValue()
+            mut dummy_lv = alloc ^LLVMValue()
             mut idx_list = new_list(1, dummy_lv)
-            list_push(idx_list, byte_idx^)
+            list_push(idx_list, byte_idx)
             
             mut i8_inner = alloc LLVMType()
             i8_inner^ = LLVMType.I8
@@ -1381,9 +1363,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = loaded_val
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), loaded_val)
                 }
                 LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -1394,12 +1374,13 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             let field_key = concat_strings(arr_name, concat_strings("_", prop_name))
             
             mut arr_ptr = alloc LLVMValue()
-            mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
+            mut ptr_opt: ?^LLVMValue = hashmap_get(gen^.function_params, field_key)
+            if ptr_opt == None {
+                ptr_opt = hashmap_get(gen^.function_params, arr_name)
+            }
             if ptr_opt != None {
-                let w_val: LLVMValuePtr = ptr_opt
-                mut w = alloc LLVMValuePtr()
-                w^ = w_val
-                arr_ptr = w^.ptr
+                    let ptr: ^LLVMValue = ptr_opt
+                    arr_ptr = ptr
             }
             let base_ptr = ir_builder_build_load(gen^.builder, arr_ptr, 8)
             
@@ -1408,9 +1389,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             eight^ = LLVMValue.ConstI64(8)
             byte_idx = ir_builder_build_mul(gen^.builder, idx_val, eight)
             
-            mut dummy_lv = alloc LLVMValue()
+            mut dummy_lv = alloc ^LLVMValue()
             mut idx_list = new_list(1, dummy_lv)
-            list_push(idx_list, byte_idx^)
+            list_push(idx_list, byte_idx)
             
             mut i8_inner = alloc LLVMType()
             i8_inner^ = LLVMType.I8
@@ -1427,9 +1408,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             let str_val = llvm_generator_operand_to_value(gen, str_ptr)
             let idx_val = llvm_generator_operand_to_value(gen, idx_op)
             
-            mut dummy_lv = alloc LLVMValue()
+            mut dummy_lv = alloc ^LLVMValue()
             mut idx_list = new_list(1, dummy_lv)
-            list_push(idx_list, idx_val^)
+            list_push(idx_list, idx_val)
             
             mut i8_inner = alloc LLVMType()
             i8_inner^ = LLVMType.I8
@@ -1442,9 +1423,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = extended_char
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), extended_char)
                 }
                 LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -1454,11 +1433,11 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             let s_val = llvm_generator_operand_to_value(gen, start_op)
             let e_val = llvm_generator_operand_to_value(gen, end_op)
             
-            mut dummy_lv = alloc LLVMValue()
+            mut dummy_lv = alloc ^LLVMValue()
             mut args = new_list(3, dummy_lv)
-            list_push(args, str_val^)
-            list_push(args, s_val^)
-            list_push(args, e_val^)
+            list_push(args, str_val)
+            list_push(args, s_val)
+            list_push(args, e_val)
             
             mut i8_inner = alloc LLVMType()
             i8_inner^ = LLVMType.I8
@@ -1469,9 +1448,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = sub_str
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), sub_str)
                 }
                 LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -1480,10 +1457,10 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             let l_val = llvm_generator_operand_to_value(gen, left_op)
             let r_val = llvm_generator_operand_to_value(gen, right_op)
             
-            mut dummy_lv = alloc LLVMValue()
+            mut dummy_lv = alloc ^LLVMValue()
             mut args = new_list(2, dummy_lv)
-            list_push(args, l_val^)
-            list_push(args, r_val^)
+            list_push(args, l_val)
+            list_push(args, r_val)
             
             mut i1_ty = alloc LLVMType()
             i1_ty^ = LLVMType.I1
@@ -1499,9 +1476,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = final_res
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), final_res)
                 }
                 LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -1530,18 +1505,13 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             mut k = 0
             while k < ops^.length {
-                let op_val = list_get(ops, k)
-                mut op = alloc FlatVectorApplyOp()
-                op^ = op_val
+                let op = list_get(ops, k)
                 let field_key = concat_strings(target_array, concat_strings("_", op^.prop))
                 
                 mut arr_var_ptr = alloc LLVMValue()
-                mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, field_key)
+                mut ptr_opt: ?^LLVMValue = hashmap_get(gen^.function_params, field_key)
                 if ptr_opt != None {
-                    let w_val: LLVMValuePtr = ptr_opt
-                    mut w = alloc LLVMValuePtr()
-                    w^ = w_val
-                    arr_var_ptr = w^.ptr
+                    arr_var_ptr = ptr_opt
                 }
                 let base_array_ptr = ir_builder_build_load(gen^.builder, arr_var_ptr, 8)
                 
@@ -1549,9 +1519,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
                 eight^ = LLVMValue.ConstI64(8)
                 let byte_offset = ir_builder_build_mul(gen^.builder, current_idx, eight)
                 
-                mut dummy_lv = alloc LLVMValue()
+                mut dummy_lv = alloc ^LLVMValue()
                 mut idx_list = new_list(1, dummy_lv)
-                list_push(idx_list, byte_offset^)
+                list_push(idx_list, byte_offset)
                 
                 mut i8_inner = alloc LLVMType()
                 i8_inner^ = LLVMType.I8
@@ -1573,17 +1543,14 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
                     Vector(rhs_arr, rhs_prop) -> {
                         let rhs_key = concat_strings(rhs_arr, concat_strings("_", rhs_prop))
                         mut rhs_var_ptr = alloc LLVMValue()
-                        mut r_ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, rhs_key)
+                        mut r_ptr_opt: ?^LLVMValue = hashmap_get(gen^.function_params, rhs_key)
                         if r_ptr_opt != None {
-                            let rw_val: LLVMValuePtr = r_ptr_opt
-                            mut rw = alloc LLVMValuePtr()
-                            rw^ = rw_val
-                            rhs_var_ptr = rw^.ptr
+                            rhs_var_ptr = r_ptr_opt
                         }
                         
                         let r_base = ir_builder_build_load(gen^.builder, rhs_var_ptr, 8)
                         mut r_idx_list = new_list(1, dummy_lv)
-                        list_push(r_idx_list, byte_offset^)
+                        list_push(r_idx_list, byte_offset)
                         
                         let r_element_ptr = ir_builder_build_gep(gen^.builder, i8_inner, r_base, r_idx_list)
                         let r_casted = ir_builder_build_bitcast(gen^.builder, r_element_ptr, pi64_ty)
@@ -1623,21 +1590,9 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
                 Variable(name) -> {
                     is_parameter = string_set_contains(gen^.parameter_names, name)
                     if not is_parameter {
-                        mut ty_opt: ?TypeInfoPtr = hashmap_get(gen^.type_env, name)
+                        mut ty_opt: ?^TypeInfo = hashmap_get(gen^.type_env, name)
                         if ty_opt != None {
-                            let tw_val: TypeInfoPtr = ty_opt
-                            mut tw = alloc TypeInfoPtr()
-                            tw^ = tw_val
-                            let ty = tw^.ptr
-                            when ty^ {
-                                Pointer(inner) -> {
-                                    is_custom_or_choice = llvm_generator_is_custom_or_choice_type(gen, inner)
-                                }
-                                Custom(cs) -> {
-                                    is_custom_or_choice = true
-                                }
-                                Unknown -> {} Int -> {} Float -> {} Boolean -> {} String -> {} Array(arr) -> {} Void -> {} NoneVariant -> {} Char -> {} Nullable(inner) -> {}
-                            }
+                            is_custom_or_choice = llvm_generator_is_custom_or_choice_type(gen, ty_opt)
                         }
                     }
                 }
@@ -1651,22 +1606,16 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             when dest^ {
                 Variable(name) -> {
-                    mut ptr_opt: ?LLVMValuePtr = hashmap_get(gen^.function_params, name)
+                    mut ptr_opt: ?^LLVMValue = hashmap_get(gen^.function_params, name)
                     if ptr_opt != None {
-                        let ptr_wrap_val: LLVMValuePtr = ptr_opt
-                        mut ptr_wrap = alloc LLVMValuePtr()
-                        ptr_wrap^ = ptr_wrap_val
-                        ir_builder_build_store(gen^.builder, loaded_val, ptr_wrap^.ptr, 0)
+                        let ptr: ^LLVMValue = ptr_opt
+                        ir_builder_build_store(gen^.builder, loaded_val, ptr, 0)
                     } else {
-                        mut vw = alloc LLVMValuePtr()
-                        vw^.ptr = loaded_val
-                        hashmap_put(gen^.function_params, name, vw^)
+                        hashmap_put(gen^.function_params, name, loaded_val)
                     }
                 }
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = loaded_val
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), loaded_val)
                 }
                 LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -1725,9 +1674,7 @@ fn llvm_generator_lower_instruction(mut gen: ^LLVMGenerator, instr: ^IRInstructi
             
             when dest^ {
                 TempReg(t) -> {
-                    mut vw = alloc LLVMValuePtr()
-                    vw^.ptr = casted_val
-                    hashmap_put(gen^.temp_map, int_to_string(t), vw^)
+                    hashmap_put(gen^.temp_map, int_to_string(t), casted_val)
                 }
                 LiteralInt(ii) -> {} LiteralFloat(f) -> {} LiteralString(s) -> {} LiteralChar(c) -> {} LiteralBool(b) -> {} Variable(name) -> {} Void -> {} NoneLiteral -> {}
             }
@@ -1747,28 +1694,28 @@ fn llvm_generator_lower_function(mut gen: ^LLVMGenerator, func: ^IRFunction) {
     
     let ret_ty = llvm_generator_return_type_str_to_llvm(gen, func^.return_type)
     
-    mut dummy_param = alloc LLVMParam()
+    mut dummy_param = alloc ^LLVMParam()
     mut params = new_list(10, dummy_param)
     
     mut p_idx = 0
     while p_idx < func^.params^.length {
         let ir_param = list_get(func^.params, p_idx)
-        string_set_add(gen^.parameter_names, ir_param.name)
+        string_set_add(gen^.parameter_names, ir_param^.name)
         
         mut llvm_p = alloc LLVMParam()
         
-        let is_scalar = (string_contains(ir_param.name, "soa_") == false) and (string_contains(ir_param.name, "_") == false)
+        let is_scalar = (string_contains(ir_param^.name, "soa_") == false) and (string_contains(ir_param^.name, "_") == false)
         if is_scalar {
-            llvm_p^.name = concat_strings("param_", ir_param.name)
+            llvm_p^.name = concat_strings("param_", ir_param^.name)
         } else {
-            llvm_p^.name = ir_param.name
+            llvm_p^.name = ir_param^.name
         }
         
-        llvm_p^.ty = llvm_generator_return_type_str_to_llvm(gen, ir_param.ty)
-        list_push(params, llvm_p^)
+        llvm_p^.ty = llvm_generator_return_type_str_to_llvm(gen, ir_param^.ty)
+        list_push(params, llvm_p)
         
         if is_scalar {
-            string_set_add(gen^.scalar_vars, ir_param.name)
+            string_set_add(gen^.scalar_vars, ir_param^.name)
         }
         p_idx = p_idx + 1
     }
@@ -1788,18 +1735,14 @@ fn llvm_generator_lower_function(mut gen: ^LLVMGenerator, func: ^IRFunction) {
     
     mut b = 0
     while b < func^.blocks^.length {
-        let block_val = list_get(func^.blocks, b)
-        mut block = alloc BasicBlock()
-        block^ = block_val
+        let block = list_get(func^.blocks, b)
         ir_builder_start_block(gen^.builder, block^.name)
         
         mut i = 0
         while i < block^.instrs^.length {
             let instr = list_get(block^.instrs, i)
-            mut instr_ptr = alloc IRInstruction()
-            instr_ptr^ = instr
-            puts(concat_strings(concat_strings("  LOWERING IR tag: ", int_to_string(get_choice_tag_ir(instr_ptr))), concat_strings(" in func: ", final_name)))
-            llvm_generator_lower_instruction(gen, instr_ptr)
+            puts(concat_strings(concat_strings("  LOWERING IR tag: ", int_to_string(get_choice_tag_ir(instr))), concat_strings(" in func: ", final_name)))
+            llvm_generator_lower_instruction(gen, instr)
             i = i + 1
         }
         
@@ -1839,9 +1782,7 @@ fn llvm_generator_generate(mut gen: ^LLVMGenerator, opt_ir: ^OptimizedIR, data_s
     mut f = 0
     while f < opt_ir^.functions^.length {
         let func_val = list_get(opt_ir^.functions, f)
-        mut func_ptr = alloc IRFunction()
-        func_ptr^ = func_val
-        llvm_generator_lower_function(gen, func_ptr)
+        llvm_generator_lower_function(gen, func_val)
         f = f + 1
     }
     
@@ -1860,9 +1801,7 @@ fn llvm_generator_generate(mut gen: ^LLVMGenerator, opt_ir: ^OptimizedIR, data_s
     
     mut j = 0
     while j < gen^.builder^.module^.global_strings^.length {
-        let gs_val = list_get(gen^.builder^.module^.global_strings, j)
-        mut gs = alloc LLVMGlobalString()
-        gs^ = gs_val
+        let gs: ^LLVMGlobalString = list_get(gen^.builder^.module^.global_strings, j)
         out = concat_strings(out, concat_strings("@", gs^.name))
         out = concat_strings(out, concat_strings(" = private unnamed_addr constant [", int_to_string(gs^.len)))
         out = concat_strings(out, concat_strings(" x i8] c\"", gs^.val))
@@ -1873,25 +1812,19 @@ fn llvm_generator_generate(mut gen: ^LLVMGenerator, opt_ir: ^OptimizedIR, data_s
     
     mut k = 0
     while k < gen^.builder^.module^.funcs^.length {
-        let func_val = list_get(gen^.builder^.module^.funcs, k)
-        mut func = alloc LLVMFunction()
-        func^ = func_val
+        let func: ^LLVMFunction = list_get(gen^.builder^.module^.funcs, k)
         out = concat_strings(out, concat_strings("define ", llvm_type_to_string(func^.ret_ty)))
         out = concat_strings(out, concat_strings(" @", func^.name))
         out = concat_strings(out, "() {\n")
         
         mut b = 0
         while b < func^.blocks^.length {
-            let blk_val = list_get(func^.blocks, b)
-            mut blk = alloc LLVMBasicBlock()
-            blk^ = blk_val
+            let blk: ^LLVMBasicBlock = list_get(func^.blocks, b)
             out = concat_strings(out, concat_strings(blk^.name, ":\n"))
             if b == 0 {
                 mut a = 0
                 while a < func^.allocas^.length {
-                    let alloca_instr = list_get(func^.allocas, a)
-                    mut instr_ptr = alloc LLVMInstruction()
-                    instr_ptr^ = alloca_instr
+                    let instr_ptr: ^LLVMInstruction = list_get(func^.allocas, a)
                     out = concat_strings(out, concat_strings(llvm_instr_to_string(instr_ptr), "\n"))
                     a = a + 1
                 }
@@ -1899,9 +1832,7 @@ fn llvm_generator_generate(mut gen: ^LLVMGenerator, opt_ir: ^OptimizedIR, data_s
             mut instr_idx = 0
             puts(concat_strings(concat_strings("DEBUG GENERATE: Block ", blk^.name), concat_strings(" instrs length: ", int_to_string(blk^.instrs^.length))))
             while instr_idx < blk^.instrs^.length {
-                let instr = list_get(blk^.instrs, instr_idx)
-                mut instr_ptr = alloc LLVMInstruction()
-                instr_ptr^ = instr
+                let instr_ptr: ^LLVMInstruction = list_get(blk^.instrs, instr_idx)
                 puts(concat_strings(concat_strings("  INSTR (tag ", int_to_string(get_choice_tag(instr_ptr))), concat_strings("): ", llvm_instr_to_string(instr_ptr))))
                 out = concat_strings(out, concat_strings(llvm_instr_to_string(instr_ptr), "\n"))
                 instr_idx = instr_idx + 1

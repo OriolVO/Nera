@@ -434,7 +434,7 @@ fn analyzer_analyze_expression(mut analyzer: ^SemanticAnalyzer, expr: ^Spanned(E
             ret_ty^ = TypeInfo.Pointer(alloc_ptr)
             
             mut i = 0
-            while i < al^.arguments^.length {
+            while i < 0 {
                 let arg: ^Spanned(Expression) = list_get(al^.arguments, i)
                 let dummy_arg = analyzer_analyze_expression(analyzer, arg)
                 i = i + 1

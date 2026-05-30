@@ -119,7 +119,7 @@ choice LLVMInstruction {
     Alloca(String, ^LLVMType),
     Load(String, ^LLVMType, ^LLVMValue, Int), // align: 0 = none
     Store(^LLVMValue, ^LLVMValue, Int),
-    GetElementPtr(String, ^LLVMType, ^LLVMValue, ^List(LLVMValue)),
+    GetElementPtr(String, ^LLVMType, ^LLVMValue, ^List(^LLVMValue)),
     Add(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
     FAdd(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
     Sub(String, ^LLVMType, ^LLVMValue, ^LLVMValue),
@@ -144,7 +144,7 @@ choice LLVMInstruction {
     IntToPtr(String, ^LLVMType, ^LLVMValue, ^LLVMType),
     PtrToInt(String, ^LLVMType, ^LLVMValue, ^LLVMType),
     // Phi omès de moment (poc utilitzat nativament pel builder excepte a vector_apply, requereix estructures complexes)
-    Call(?String, ^LLVMType, String, ^List(LLVMValue)),
+    Call(?String, ^LLVMType, String, ^List(^LLVMValue)),
     Br(String, String), // target, meta (buit si cap)
     CondBr(^LLVMValue, String, String, String),
     Ret(?^LLVMValue),
@@ -169,10 +169,8 @@ fn llvm_instr_to_string(instr: ^LLVMInstruction) -> String {
             mut s = concat6("  %", dest, " = getelementptr inbounds ", llvm_type_to_string(base_ty), ", ", llvm_value_typed_string(ptr))
             mut i = 0
             while i < indices^.length {
-                let idx = list_get(indices, i)
-                mut idx_ptr = alloc LLVMValue()
-                idx_ptr^ = idx
-                s = concat3(s, ", ", llvm_value_typed_string(idx_ptr))
+                let idx: ^LLVMValue = list_get(indices, i)
+                s = concat3(s, ", ", llvm_value_typed_string(idx))
                 i = i + 1
             }
             return s
@@ -213,10 +211,8 @@ fn llvm_instr_to_string(instr: ^LLVMInstruction) -> String {
             
             mut i = 0
             while i < args^.length {
-                let a = list_get(args, i)
-                mut a_ptr = alloc LLVMValue()
-                a_ptr^ = a
-                s = concat_strings(s, llvm_value_typed_string(a_ptr))
+                let a: ^LLVMValue = list_get(args, i)
+                s = concat_strings(s, llvm_value_typed_string(a))
                 if i < args^.length - 1 {
                     s = concat_strings(s, ", ")
                 }
@@ -250,7 +246,7 @@ fn llvm_instr_to_string(instr: ^LLVMInstruction) -> String {
 
 data LLVMBasicBlock {
     name: String
-    instrs: ^List(LLVMInstruction)
+    instrs: ^List(^LLVMInstruction)
 }
 
 data LLVMParam {
@@ -261,9 +257,10 @@ data LLVMParam {
 data LLVMFunction {
     name: String
     ret_ty: ^LLVMType
-    params: ^List(LLVMParam)
-    blocks: ^List(LLVMBasicBlock)
-    allocas: ^List(LLVMInstruction)
+    params: ^List(^LLVMParam)
+    blocks: ^List(^LLVMBasicBlock)
+    allocas: ^List(^LLVMInstruction)
+    str_literals: ^List(String)
 }
 
 data LLVMGlobalString {
@@ -274,9 +271,9 @@ data LLVMGlobalString {
 
 data LLVMModule {
     name: String
-    funcs: ^List(LLVMFunction)
+    funcs: ^List(^LLVMFunction)
     declarations: ^List(String)
-    global_strings: ^List(LLVMGlobalString)
+    global_strings: ^List(^LLVMGlobalString)
 }
 
 data IRBuilder {

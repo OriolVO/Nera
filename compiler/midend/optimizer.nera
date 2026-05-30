@@ -9,9 +9,9 @@ data SoAArray {
 }
 
 data OptimizedIR {
-    functions: ^List(IRFunction)
+    functions: ^List(^IRFunction)
     soa_arrays: ^List(SoAArray)
-    global_instructions: ^List(IRInstruction)
+    global_instructions: ^List(^IRInstruction)
 }
 
 data UseDef {
@@ -50,22 +50,22 @@ fn add_soa(list: ^List(SoAArray), name: String, size: Int) {
     }
 }
 
-fn optimizer_run_soa_pass_globals(opt: ^IROptimizer, instrs: ^List(IRInstruction)) -> ^List(SoAArray) {
+fn optimizer_run_soa_pass_globals(opt: ^IROptimizer, instrs: ^List(^IRInstruction)) -> ^List(SoAArray) {
     mut dummy_soa = alloc SoAArray()
     mut soa_list = new_list(10, dummy_soa)
     
     mut i = 0
     while i < instrs^.length {
         let instr = list_get(instrs, i)
-        when instr {
+        when instr^ {
             FlatVectorApply(target_array, ops, start_op, end_op, size) -> {
                 mut j = 0
                 while j < ops^.length {
                     let op = list_get(ops, j)
-                    let full_name = concat_strings(target_array, concat_strings("_", op.prop))
+                    let full_name = concat_strings(target_array, concat_strings("_", op^.prop))
                     add_soa(soa_list, full_name, size)
                     
-                    when op.operand {
+                    when op^.operand {
                         Vector(rhs_arr, rhs_prop) -> {
                             let rhs_full = concat_strings(rhs_arr, concat_strings("_", rhs_prop))
                             add_soa(soa_list, rhs_full, size)
@@ -102,17 +102,17 @@ fn optimizer_run_soa_pass_func(opt: ^IROptimizer, func: ^IRFunction) -> ^List(So
     while b < func^.blocks^.length {
         let block = list_get(func^.blocks, b)
         mut i = 0
-        while i < block.instrs^.length {
-            let instr = list_get(block.instrs, i)
-            when instr {
+        while i < block^.instrs^.length {
+            let instr = list_get(block^.instrs, i)
+            when instr^ {
                 FlatVectorApply(target_array, ops, start_op, end_op, size) -> {
                     mut j = 0
                     while j < ops^.length {
                         let op = list_get(ops, j)
-                        let full_name = concat_strings(target_array, concat_strings("_", op.prop))
+                        let full_name = concat_strings(target_array, concat_strings("_", op^.prop))
                         add_soa(soa_list, full_name, size)
                         
-                        when op.operand {
+                        when op^.operand {
                             Vector(rhs_arr, rhs_prop) -> {
                                 let rhs_full = concat_strings(rhs_arr, concat_strings("_", rhs_prop))
                                 add_soa(soa_list, rhs_full, size)
@@ -166,14 +166,14 @@ fn add_def(opt: ^IROptimizer, defs: ^List(String), op: ^IROperand) {
     }
 }
 
-fn instr_use_def(opt: ^IROptimizer, instr: IRInstruction) -> ^UseDef {
+fn instr_use_def(opt: ^IROptimizer, instr: ^IRInstruction) -> ^UseDef {
     mut res = alloc UseDef()
     mut dummy_str = alloc String()
     dummy_str^ = ""
     res^.uses = new_list(5, dummy_str)
     res^.defs = new_list(5, dummy_str)
     
-    when instr {
+    when instr^ {
         Assign(dest, src) -> {
             add_use(opt, res^.uses, src)
             add_def(opt, res^.defs, dest)
@@ -204,9 +204,7 @@ fn instr_use_def(opt: ^IROptimizer, instr: IRInstruction) -> ^UseDef {
             mut i = 0
             while i < args^.length {
                 let a = list_get(args, i)
-                mut a_ptr = alloc IROperand()
-                a_ptr^ = a
-                add_use(opt, res^.uses, a_ptr)
+                add_use(opt, res^.uses, a)
                 i = i + 1
             }
             if dest_opt != None {
@@ -220,7 +218,7 @@ fn instr_use_def(opt: ^IROptimizer, instr: IRInstruction) -> ^UseDef {
             mut i = 0
             while i < ops^.length {
                 let vop = list_get(ops, i)
-                when vop.operand {
+                when vop^.operand {
                     Scalar(op) -> { add_use(opt, res^.uses, op) }
                     Vector(a, p) -> {}
                 }
@@ -258,9 +256,7 @@ fn instr_use_def(opt: ^IROptimizer, instr: IRInstruction) -> ^UseDef {
             mut i = 0
             while i < args^.length {
                 let a = list_get(args, i)
-                mut a_ptr = alloc IROperand()
-                a_ptr^ = a
-                add_use(opt, res^.uses, a_ptr)
+                add_use(opt, res^.uses, a)
                 i = i + 1
             }
             add_def(opt, res^.defs, dest)
@@ -301,7 +297,7 @@ fn get_block_index(func: ^IRFunction, name: String) -> Int {
     mut i = 0
     while i < func^.blocks^.length {
         let b = list_get(func^.blocks, i)
-        if string_eq(b.name, name) { return i }
+        if string_eq(b^.name, name) { return i }
         i = i + 1
     }
     return -1
@@ -332,7 +328,7 @@ fn optimizer_run_liveness_and_dce(opt: ^IROptimizer, mut func: ^IRFunction) {
         let block = list_get(func^.blocks, b)
         mut s_list = new_list(2, dummy_int)
         
-        when block.terminator {
+        when block^.terminator {
             Jump(tgt) -> {
                 let idx = get_block_index(func, tgt)
                 if idx >= 0 { list_push(s_list, idx) }
@@ -353,8 +349,8 @@ fn optimizer_run_liveness_and_dce(opt: ^IROptimizer, mut func: ^IRFunction) {
         mut b_use = new_string_set()
         
         mut i = 0
-        while i < block.instrs^.length {
-            let instr = list_get(block.instrs, i)
+        while i < block^.instrs^.length {
+            let instr = list_get(block^.instrs, i)
             let ud = instr_use_def(opt, instr)
             
             mut u_idx = 0
@@ -373,7 +369,7 @@ fn optimizer_run_liveness_and_dce(opt: ^IROptimizer, mut func: ^IRFunction) {
             i = i + 1
         }
         
-        when block.terminator {
+        when block^.terminator {
             Branch(cond, t, f) -> {
                 let u = operand_to_var(opt, cond)
                 if not string_eq(u, "") and not string_set_contains(b_def, u) { string_set_add(b_use, u) }
@@ -482,7 +478,7 @@ fn optimizer_run_liveness_and_dce(opt: ^IROptimizer, mut func: ^IRFunction) {
         let out_wrapper = list_get(out_sets, b)
         mut live_now = string_set_copy(out_wrapper.ptr)
         
-        when block.terminator {
+        when block^.terminator {
             Branch(cond, t, f) -> {
                 let u = operand_to_var(opt, cond)
                 if not string_eq(u, "") { string_set_add(live_now, u) }
@@ -497,16 +493,16 @@ fn optimizer_run_liveness_and_dce(opt: ^IROptimizer, mut func: ^IRFunction) {
             Jump(t) -> {} None -> {}
         }
         
-        mut dummy_instr = alloc IRInstruction()
+        mut dummy_instr = alloc ^IRInstruction()
         mut opt_instrs = new_list(10, dummy_instr)
         
-        mut inst_idx = block.instrs^.length - 1
+        mut inst_idx = block^.instrs^.length - 1
         while inst_idx >= 0 {
-            let instr = list_get(block.instrs, inst_idx)
+            let instr = list_get(block^.instrs, inst_idx)
             let ud = instr_use_def(opt, instr)
             
             mut has_side_effects = false
-            when instr {
+            when instr^ {
                 Call(d, c, a) -> { has_side_effects = true }
                 StoreProperty(o, p, v) -> { has_side_effects = true }
                 FlatVectorApply(t, o, s, e, sz) -> { has_side_effects = true }
@@ -561,26 +557,21 @@ fn optimizer_run_liveness_and_dce(opt: ^IROptimizer, mut func: ^IRFunction) {
             rev_idx = rev_idx - 1
         }
         
-        block.instrs = final_instrs
+        block^.instrs = final_instrs
         list_set(func^.blocks, b, block)
         b = b + 1
     }
 }
 
-fn optimizer_optimize(opt: ^IROptimizer, functions: ^List(IRFunction), global_instructions: ^List(IRInstruction)) -> ^OptimizedIR {
+fn optimizer_optimize(opt: ^IROptimizer, functions: ^List(^IRFunction), global_instructions: ^List(^IRInstruction)) -> ^OptimizedIR {
     mut soa_arrays = optimizer_run_soa_pass_globals(opt, global_instructions)
     
-    mut dummy_func = alloc IRFunction()
-    if functions^.length > 0 {
-        dummy_func^ = list_get(functions, 0)
-    }
+    mut dummy_func = alloc ^IRFunction()
     mut optimized_functions = new_list(10, dummy_func)
     
     mut i = 0
     while i < functions^.length {
-        mut func_val = list_get(functions, i)
-        mut func = alloc IRFunction()
-        func^ = func_val
+        let func = list_get(functions, i)
         
         let func_soa = optimizer_run_soa_pass_func(opt, func)
         mut j = 0
@@ -592,7 +583,7 @@ fn optimizer_optimize(opt: ^IROptimizer, functions: ^List(IRFunction), global_in
         
         optimizer_run_liveness_and_dce(opt, func)
         
-        list_push(optimized_functions, func^)
+        list_push(optimized_functions, func)
         i = i + 1
     }
     

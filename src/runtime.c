@@ -7,6 +7,15 @@ void print_int(long long value) {
     printf("%lld\n", value);
 }
 
+long long string_index_of(const char* s, long long c) {
+    if (!s) return -1;
+    char* pos = strchr(s, (int)c);
+    if (pos) {
+        return (long long)(pos - s);
+    }
+    return -1;
+}
+
 void print_float(double value) {
     printf("%f\n", value);
 }
@@ -17,6 +26,7 @@ char** global_argv = NULL;
 extern int nera_main();
 
 int main(int argc, char** argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
     global_argc = argc;
     global_argv = argv;
     return nera_main();
@@ -163,7 +173,9 @@ bool is_null(void* ptr) {
 
 void* alloc_array(long long capacity, void* dummy) {
     // 8 bytes (64-bits) per element com a norma general del compilador
-    return calloc(capacity, 8); 
+    // Use malloc (not calloc) to avoid zero-filling regions that may overlap
+    // with live heap objects allocated via alloc(), which causes data corruption.
+    return malloc(capacity * 8);
 }
 
 void free_array(void* ptr) {
@@ -181,11 +193,34 @@ void* ptr_read(void** ptr, long long offset) {
 long long get_choice_tag(void* ptr) {
     if (!ptr) return -1;
     void* heap_ptr = *(void**)ptr;
+    printf("DEBUG RUNTIME: get_choice_tag ptr = %p, heap_ptr = %p\n", ptr, heap_ptr);
     if (!heap_ptr) return -2;
-    return *(long long*)heap_ptr;
+    long long* lptr = (long long*)heap_ptr;
+    printf("  [offset 0]: %lld (0x%llx)\n", lptr[0], lptr[0]);
+    printf("  [offset 8]: %lld (0x%llx)\n", lptr[1], lptr[1]);
+    if (lptr[0] > 0x100000000000) {
+        long long* inner_lptr = (long long*)lptr[0];
+        printf("  DEBUG INNER (0x%llx):\n", lptr[0]);
+        printf("    [offset 0]: %lld (0x%llx)\n", inner_lptr[0], inner_lptr[0]);
+        printf("    [offset 8]: %lld (0x%llx)\n", inner_lptr[1], inner_lptr[1]);
+    }
+    long long tag = lptr[0];
+    return tag;
 }
 
 long long get_choice_tag_ir(void* ptr) {
+    return get_choice_tag(ptr);
+}
+
+long long get_choice_tag_operand(void* ptr) {
+    return get_choice_tag(ptr);
+}
+
+long long get_choice_tag_expr(void* ptr) {
+    return get_choice_tag(ptr);
+}
+
+long long get_choice_tag_primary(void* ptr) {
     return get_choice_tag(ptr);
 }
 
@@ -196,3 +231,30 @@ void print_address(char* name, void* ptr) {
 void print_long(char* name, long long val) {
     printf("DEBUG: %s long value = %lld\n", name, val);
 }
+
+void* identity_ptr(void* ptr) {
+    return ptr;
+}
+
+bool is_null_val(void* ptr) {
+    return ptr == NULL;
+}
+
+bool is_null_instr(void* ptr) {
+    return ptr == NULL;
+}
+
+bool is_null_list(void* ptr) {
+    return ptr == NULL;
+}
+
+bool is_null_type_info(void* ptr) {
+    return ptr == NULL;
+}
+
+bool is_null_type(void* ptr) {
+    return ptr == NULL;
+}void print_ptr(void* p) {
+    printf("PTR: %p\n", p);
+}
+void debug_ptr(void* ptr) { printf("PTR: %p, TAG: %d\n", ptr, *(int*)ptr); fflush(stdout); }

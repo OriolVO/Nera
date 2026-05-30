@@ -154,7 +154,7 @@ impl<'a> Parser<'a> {
             TokenKind::Extern => Declaration::Extern(self.parse_extern_decl()?),
             TokenKind::Let | TokenKind::Mut => Declaration::Var(self.parse_var_decl()?),
             _ => {
-                self.report_error(&start_span, "Expected declaration (data, choice, fn, extern, let, mut)");
+                self.report_error(&start_span, &format!("Expected declaration at line {}, col {}", self.current_token.span.start_line, self.current_token.span.start_col));
                 return None;
             }
         };

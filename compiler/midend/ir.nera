@@ -23,7 +23,7 @@ choice Terminator {
 
 data BasicBlock {
     name: String
-    instrs: ^List(IRInstruction)
+    instrs: ^List(^IRInstruction)
     terminator: Terminator
 }
 
@@ -34,9 +34,9 @@ data IRParam {
 
 data IRFunction {
     name: String
-    params: ^List(IRParam)
+    params: ^List(^IRParam)
     return_type: String
-    blocks: ^List(BasicBlock)
+    blocks: ^List(^BasicBlock)
     is_extern: Boolean
 }
 
@@ -57,11 +57,11 @@ choice IRInstruction {
     BinaryOp(^IROperand, BinaryOp, ^IROperand, ^IROperand),
     LoadProperty(^IROperand, ^IROperand, String),
     StoreProperty(^IROperand, String, ^IROperand),
-    Call(?^IROperand, ^IROperand, ^List(IROperand)),
-    FlatVectorApply(String, ^List(FlatVectorApplyOp), ^IROperand, ^IROperand, Int),
+    Call(?^IROperand, ^IROperand, ^List(^IROperand)),
+    FlatVectorApply(String, ^List(^FlatVectorApplyOp), ^IROperand, ^IROperand, Int),
     ExtractTag(^IROperand, ^IROperand),
     ExtractPayload(^IROperand, ^IROperand, Int),
-    ConstructADT(^IROperand, Int, ^List(IROperand)),
+    ConstructADT(^IROperand, Int, ^List(^IROperand)),
     Alloc(^IROperand, String, Int),
     Free(^IROperand),
     LoadPointer(^IROperand, ^IROperand),

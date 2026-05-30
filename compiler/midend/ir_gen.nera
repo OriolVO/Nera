@@ -179,15 +179,17 @@ fn string_str_map_contains(map: ^StringStringMap, key: String) -> Boolean {
         i = i + 1
     }
     return false
-}
+}extern fn get_choice_tag_operand(ptr: ^IROperand) -> Int
+extern fn get_choice_tag_expr(ptr: ^Expression) -> Int
+extern fn get_choice_tag_primary(ptr: ^PrimaryExpr) -> Int
 
 data IRGenerator {
-    functions: ^List(IRFunction)
+    functions: ^List(^IRFunction)
     active_function: ?^IRFunction
     active_block: ?^BasicBlock
     temp_count: Int
     label_count: Int
-    global_instructions: ^List(IRInstruction)
+    global_instructions: ^List(^IRInstruction)
     data_structs: ^StringListMap
     choice_tags: ^StringInnerMap
     array_sizes: ^StringIntMap
@@ -217,13 +219,13 @@ fn type_to_string(ty: ^Spanned(Type)) -> String {
 
 fn ir_gen_new() -> ^IRGenerator {
     mut gen = alloc IRGenerator()
-    mut dummy_fn = alloc IRFunction()
+    mut dummy_fn = alloc ^IRFunction()
     gen^.functions = new_list(10, dummy_fn)
     gen^.active_function = None
     gen^.active_block = None
     gen^.temp_count = 0
     gen^.label_count = 0
-    mut dummy_instr = alloc IRInstruction()
+    mut dummy_instr = alloc ^IRInstruction()
     gen^.global_instructions = new_list(10, dummy_instr)
     
     mut data_structs = alloc StringListMap()
@@ -270,9 +272,13 @@ fn ir_emit(mut gen: ^IRGenerator, instr: IRInstruction) {
     mut blk_opt = gen^.active_block
     if blk_opt != None {
         mut blk: ^BasicBlock = blk_opt
-        list_push(blk^.instrs, instr)
+        mut real_instr = alloc IRInstruction()
+        real_instr^ = instr
+        list_push(blk^.instrs, real_instr)
     } else {
-        list_push(gen^.global_instructions, instr)
+        mut real_instr = alloc IRInstruction()
+        real_instr^ = instr
+        list_push(gen^.global_instructions, real_instr)
     }
 }
 
@@ -296,7 +302,7 @@ fn ir_finish_block(mut gen: ^IRGenerator, term: Terminator) {
         mut fn_opt = gen^.active_function
         if fn_opt != None {
             let func: ^IRFunction = fn_opt
-            list_push(func^.blocks, blk^)
+            list_push(func^.blocks, blk)
         }
         
         gen^.active_block = None
@@ -324,7 +330,7 @@ fn ir_start_block(mut gen: ^IRGenerator, name: String) {
     
     mut new_blk = alloc BasicBlock()
     new_blk^.name = name
-    mut dummy_instr = alloc IRInstruction()
+    mut dummy_instr = alloc ^IRInstruction()
     new_blk^.instrs = new_list(10, dummy_instr)
     new_blk^.terminator = Terminator.None
     
@@ -354,9 +360,7 @@ fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
                 ret_ty_name = r^.node.name
             }
             
-            mut dummy_param = alloc IRParam()
-            dummy_param^.name = ""
-            dummy_param^.ty = ""
+            mut dummy_param = alloc ^IRParam()
             mut params_list = new_list(10, dummy_param)
             mut i = 0
             while i < fn_decl^.params^.length {
@@ -379,20 +383,20 @@ fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
                             mut ir_p = alloc IRParam()
                             ir_p^.name = concat_strings(concat_strings(param^.name, "_"), field_name)
                             ir_p^.ty = ty_str
-                            list_push(params_list, ir_p^)
+                            list_push(params_list, ir_p)
                             f_idx = f_idx + 1
                         }
                     } else {
                         mut ir_p = alloc IRParam()
                         ir_p^.name = param^.name
                         ir_p^.ty = ty_str
-                        list_push(params_list, ir_p^)
+                        list_push(params_list, ir_p)
                     }
                 } else {
                     mut ir_p = alloc IRParam()
                     ir_p^.name = param^.name
                     ir_p^.ty = ty_str
-                    list_push(params_list, ir_p^)
+                    list_push(params_list, ir_p)
                 }
                 
                 i = i + 1
@@ -402,7 +406,7 @@ fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
             func^.name = fn_decl^.name
             func^.params = params_list
             func^.return_type = ret_ty_name
-            mut dummy_blk = alloc BasicBlock()
+            mut dummy_blk = alloc ^BasicBlock()
             func^.blocks = new_list(10, dummy_blk)
             func^.is_extern = false
             
@@ -433,7 +437,7 @@ fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
             mut cur_fn_opt = gen^.active_function
             if cur_fn_opt != None {
                 let cur_fn: ^IRFunction = cur_fn_opt
-                list_push(gen^.functions, cur_fn^)
+                list_push(gen^.functions, cur_fn)
             }
             gen^.active_function = None
         }
@@ -445,9 +449,7 @@ fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
                 ret_ty_name = r^.node.name
             }
             
-            mut dummy_param = alloc IRParam()
-            dummy_param^.name = ""
-            dummy_param^.ty = ""
+            mut dummy_param = alloc ^IRParam()
             mut params_list = new_list(10, dummy_param)
             mut i = 0
             while i < extern_decl^.params^.length {
@@ -456,7 +458,7 @@ fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
                 mut ir_p = alloc IRParam()
                 ir_p^.name = param^.name
                 ir_p^.ty = ty_str
-                list_push(params_list, ir_p^)
+                list_push(params_list, ir_p)
                 i = i + 1
             }
             
@@ -464,11 +466,11 @@ fn ir_generate_declaration(mut gen: ^IRGenerator, decl: Declaration) {
             func^.name = extern_decl^.name
             func^.params = params_list
             func^.return_type = ret_ty_name
-            mut dummy_blk = alloc BasicBlock()
+            mut dummy_blk = alloc ^BasicBlock()
             func^.blocks = new_list(10, dummy_blk)
             func^.is_extern = true
             
-            list_push(gen^.functions, func^)
+            list_push(gen^.functions, func)
         }
         Var(var_decl) -> {
             let val = ir_generate_expression(gen, var_decl^.initializer)
@@ -621,9 +623,9 @@ fn ir_generate_statement(mut gen: ^IRGenerator, stmt: ^Spanned(Statement)) {
                                             apply_op^.op = assign^.op
                                             apply_op^.operand = right_val^
                                             
-                                            mut dummy_op = alloc FlatVectorApplyOp()
+                                            mut dummy_op = alloc ^FlatVectorApplyOp()
                                             mut ops_list = new_list(1, dummy_op)
-                                            list_push(ops_list, apply_op^)
+                                            list_push(ops_list, apply_op)
                                             
                                             ir_emit(gen, IRInstruction.FlatVectorApply(target_array, ops_list, start_op, end_op, size))
                                             handled_special = true
@@ -819,8 +821,18 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
     mut ret_op = alloc IROperand()
     ret_op^ = IROperand.Void
     
+    mut temp_expr = alloc Expression()
+    temp_expr^ = expr^.node
+    let expr_node_tag = get_choice_tag_expr(temp_expr)
+    let dummy_dbg2 = puts(concat_strings("DEBUG IRGEN: expr node tag = ", int_to_string(expr_node_tag)))
+
+    
     when expr^.node {
         Primary(prim) -> {
+            mut temp_prim = alloc PrimaryExpr()
+            temp_prim^ = prim^
+            let prim_tag = get_choice_tag_primary(temp_prim)
+            let dummy_dbg3 = puts(concat_strings("DEBUG IRGEN: primary tag = ", int_to_string(prim_tag)))
             when prim^ {
                 Identifier(name) -> { ret_op^ = IROperand.Variable(name) }
                 Integer(val) -> { ret_op^ = IROperand.LiteralInt(val) }
@@ -860,13 +872,17 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
         Call(call) -> {
             let c: ^FunctionCall = call
             let callee = ir_generate_expression(gen, c^.callee)
+            let callee_tag = get_choice_tag_operand(callee)
+            let dummy_dbg = puts(concat_strings("DEBUG IRGEN: callee choice tag = ", int_to_string(callee_tag)))
+
             
-            mut args_list = new_list(10, callee) // dummy default
+            mut dummy_op = alloc ^IROperand()
+            mut args_list = new_list(10, dummy_op) // dummy default
             mut i = 0
             while i < c^.arguments^.length {
                 let arg = list_get(c^.arguments, i)
                 let arg_op = ir_generate_expression(gen, arg)
-                list_push(args_list, arg_op^)
+                list_push(args_list, arg_op)
                 i = i + 1
             }
             
@@ -879,6 +895,10 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
         When(w) -> {
             let when_expr: ^WhenExpr = w
             let target_op = ir_generate_expression(gen, when_expr^.target)
+            
+            let loaded_target = ir_new_temp(gen)
+            ir_emit(gen, IRInstruction.LoadPointer(loaded_target, target_op))
+            
             let dest_temp = ir_new_temp(gen)
             let end_label = ir_new_label(gen, "when_end")
             
@@ -886,7 +906,7 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
                 let cmp_res = ir_new_temp(gen)
                 mut none_op = alloc IROperand()
                 none_op^ = IROperand.NoneLiteral
-                ir_emit(gen, IRInstruction.BinaryOp(cmp_res, BinaryOp.Eq, target_op, none_op))
+                ir_emit(gen, IRInstruction.BinaryOp(cmp_res, BinaryOp.Eq, loaded_target, none_op))
                 
                 let none_label = ir_new_label(gen, "when_none")
                 let val_label = ir_new_label(gen, "when_val")
@@ -937,14 +957,18 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
                 while i < when_expr^.cases^.length {
                     let case_node = list_get(when_expr^.cases, i)
                     if not string_eq(case_node^.variant_name, "None") {
-                        mut bind_op = alloc IROperand()
-                        bind_op^ = IROperand.Variable(case_node^.variant_name) // bindings[0] conceptually
-                        ir_emit(gen, IRInstruction.Assign(bind_op, target_op))
-                        
                         mut j = 0
-                        while j < case_node^.body^.node.statements^.length {
-                            let stmt = list_get(case_node^.body^.node.statements, j)
-                            if j == case_node^.body^.node.statements^.length - 1 {
+                        while j < case_node^.bindings^.length {
+                            let binding: String = list_get(case_node^.bindings, j)
+                            mut bind_op = alloc IROperand()
+                            bind_op^ = IROperand.Variable(binding)
+                            ir_emit(gen, IRInstruction.ExtractPayload(bind_op, loaded_target, j))
+                            j = j + 1
+                        }
+                        mut j_stmt = 0
+                        while j_stmt < case_node^.body^.node.statements^.length {
+                            let stmt = list_get(case_node^.body^.node.statements, j_stmt)
+                            if j_stmt == case_node^.body^.node.statements^.length - 1 {
                                 when stmt^.node {
                                     Expr(e) -> {
                                         let val = ir_generate_expression(gen, e)
@@ -962,7 +986,7 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
                             } else {
                                 ir_generate_statement(gen, stmt)
                             }
-                            j = j + 1
+                            j_stmt = j_stmt + 1
                         }
                         i = when_expr^.cases^.length // break
                     } else {
@@ -976,7 +1000,7 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
             
             // Standard enum
             let tag_temp = ir_new_temp(gen)
-            ir_emit(gen, IRInstruction.ExtractTag(tag_temp, target_op))
+            ir_emit(gen, IRInstruction.ExtractTag(tag_temp, loaded_target))
             
             mut matched_map: ?^StringIntMap = None
             mut max_matches = -1
@@ -1030,10 +1054,10 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
                 
                 mut b_idx = 0
                 while b_idx < case_node^.bindings^.length {
-                    let b_name = list_get(case_node^.bindings, b_idx)
+                    let b_name: String = list_get(case_node^.bindings, b_idx)
                     mut b_op = alloc IROperand()
                     b_op^ = IROperand.Variable(b_name)
-                    ir_emit(gen, IRInstruction.ExtractPayload(b_op, target_op, b_idx))
+                    ir_emit(gen, IRInstruction.ExtractPayload(b_op, loaded_target, b_idx))
                     b_idx = b_idx + 1
                 }
                 
@@ -1147,12 +1171,13 @@ fn ir_generate_expression(mut gen: ^IRGenerator, expr: ^Spanned(Expression)) -> 
                 }
             }
             
-            mut args_list = new_list(10, ret_op) // dummy default
+            mut dummy_op = alloc ^IROperand()
+            mut args_list = new_list(10, dummy_op) // dummy default
             mut i = 0
             while i < var_expr^.arguments^.length {
                 let arg = list_get(var_expr^.arguments, i)
                 let arg_op = ir_generate_expression(gen, arg)
-                list_push(args_list, arg_op^)
+                list_push(args_list, arg_op)
                 i = i + 1
             }
             

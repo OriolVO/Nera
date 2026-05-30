@@ -80,6 +80,13 @@ impl LLVMGenerator {
         }
     }
 
+    fn is_scalar_type(&self, ty: &TypeInfo) -> bool {
+        match ty {
+            TypeInfo::Void | TypeInfo::None => false,
+            _ => true,
+        }
+    }
+
     fn str_to_llvm_type(&self, ty_str: &str) -> LLVMType {
         match ty_str {
             "Int" | "Char" => LLVMType::I64,
@@ -625,12 +632,12 @@ impl LLVMGenerator {
                                         has_stack_slot = true;
                                     }
                                 }
-                                let is_custom = if let Some(ty) = self.get_type(vname) {
-                                    self.is_custom_or_choice_type(ty)
+                                let is_scalar = if let Some(ty) = self.get_type(vname) {
+                                    self.is_scalar_type(ty)
                                 } else {
                                     false
                                 };
-                                let is_scalar = has_stack_slot && (self.scalar_vars.contains(vname) || vname.starts_with("param_") || is_custom);
+                                let is_scalar = has_stack_slot && (is_scalar || self.scalar_vars.contains(vname) || vname.starts_with("param_"));
                                 if is_scalar {
                                     arg_vals.push(self.builder.build_load(ptr.clone(), None)?);
                                 } else {
@@ -1106,14 +1113,8 @@ impl LLVMGenerator {
                 
                 if !is_parameter {
                     if let Some(ty) = &ptr_ty_opt {
-                        match ty {
-                            TypeInfo::Pointer(inner) => {
-                                is_custom_or_choice = self.is_custom_or_choice_type(inner);
-                            }
-                            TypeInfo::Custom(_) => {
-                                is_custom_or_choice = true;
-                            }
-                            _ => {}
+                        if self.is_custom_or_choice_type(ty) {
+                            is_custom_or_choice = true;
                         }
                     }
                 }
@@ -1347,12 +1348,12 @@ impl LLVMGenerator {
                                 has_stack_slot = true;
                             }
                         }
-                        let is_custom = if let Some(ty) = self.get_type(name) {
-                            self.is_custom_or_choice_type(ty)
+                        let is_scalar = if let Some(ty) = self.get_type(name) {
+                            self.is_scalar_type(ty)
                         } else {
                             false
                         };
-                        let is_scalar = has_stack_slot && (self.scalar_vars.contains(name) || name.starts_with("param_") || is_custom);
+                        let is_scalar = has_stack_slot && (is_scalar || self.scalar_vars.contains(name) || name.starts_with("param_"));
                         if is_scalar {
                             self.builder.build_load(ptr.clone(), None)
                         } else {
